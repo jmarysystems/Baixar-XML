@@ -126,14 +126,14 @@ Deno.serve(async (req) => {
 
     if (!chaves.length || !certs.length) return json({ erro: "Certificado inválido." }, 400);
 
-    const chave = chaves[0].key as forge.pki.rsa.PrivateKey;
-    const chavePem = forge.pki.privateKeyToPem(chave);
+    const chavePrivada = chaves[0].key as forge.pki.rsa.PrivateKey;
+    const chavePem = forge.pki.privateKeyToPem(chavePrivada);
 
     // A SEFAZ exige a cadeia completa (folha + intermediários da ICP-Brasil).
     // A folha é o certificado cuja chave pública casa com a chave privada.
     const ehFolha = (bag: { cert: forge.pki.Certificate }) => {
       const pub = bag.cert.publicKey as forge.pki.rsa.PublicKey | undefined;
-      return !!pub?.n && !!chave?.n && pub.n.equals(chave.n);
+      return !!pub?.n && !!chavePrivada?.n && pub.n.equals(chavePrivada.n);
     };
 
     const folha = certs.find(ehFolha) ?? certs[0];
