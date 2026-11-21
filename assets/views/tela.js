@@ -121,7 +121,7 @@ export async function render(raiz, ctx) {
         <input type="search" id="busca-docs"
                placeholder="NSU, chave da NF-e, CNPJ ou tipo"></label>
       ${baixados.length ? `<div class="tabela-rolagem"><table>
-        <thead><tr><th>CNPJ</th><th>Chave</th><th>Tipo</th><th>NSU</th>
+        <thead><tr><th>CNPJ</th><th>Chave</th><th>Tipo</th><th>Manifestação</th><th>NSU</th>
           <th>Estabelecimento</th><th>Baixado em</th><th></th></tr></thead>
         <tbody>
           ${baixados.map((d) => `<tr data-busca="${ui.esc(
@@ -130,6 +130,13 @@ export async function render(raiz, ctx) {
             <td class="mono">${ui.esc(d.cnpj)}</td>
             <td class="mono">${ui.esc(d.chave || '—')}</td>
             <td>${ui.esc(d.tipo || d.schema || '—')}</td>
+            <td>${(d.tipo || '').startsWith('resNFe') && d.chave
+              ? `<button type="button" class="botao-pequeno"
+                        data-manifestar="${ui.esc(d.chave)}"
+                        data-loja="${ui.esc(d.loja_id || '')}">Manifestar</button>`
+              : ((d.tipo === 'NF-e')
+                ? '<span class="badge badge-ok">completa</span>'
+                : '—')}</td>
             <td class="mono">${ui.esc(d.nsu || '—')}</td>
             <td>${ui.esc(d.arm_lojas?.nome || '—')}</td>
             <td>${ui.dataHoraBR(d.baixado_em)}</td>
@@ -288,6 +295,43 @@ export async function render(raiz, ctx) {
         ui.toast('XML excluído.');
         ctx.recarregar();
       } catch (erro) { ui.toast(erro.message, 'erro'); }
+    });
+  }
+
+  // ------------------------------------------------ manifestar
+  for (const b of raiz.querySelectorAll('[data-manifestar]')) {
+    b.addEventListener('click', async () => {
+      const chave = b.dataset.manifestar;
+      const lojaId = b.dataset.loja;
+      if (!lojaId) { ui.toast('Documento sem estabelecimento vinculado.', 'erro'); return; }
+
+      const confirmar = window.confirm(
+        `Manifestar "Ciência da Emissão" para a nota\n${chave}?\n\n` +
+        'Isso registra o evento na SEFAZ e libera o XML completo.');
+      if (!confirmar) return;
+
+      b.disabled = true;
+      b.textContent = 'Enviando…';
+      try {
+        const pedido = await criar('xml_pedidos', {
+          acao: 'manifestar',
+          loja_id: lojaId,
+          cnpj: b.closest('tr').querySelector('td').textContent.trim(),
+          chave,
+          ult_nsu: '0',
+          tp_amb: '1',
+          cuf: '23',
+          criado_por: ctx.perfil?.id || null,
+        });
+        andamento.innerHTML = `<div class="cartao">
+          <strong>⏳ Manifestação enviada para a fila</strong> — a SEFAZ processa
+          em instantes e o XML completo aparece na lista.</div>`;
+        acompanhar(pedido.id);
+      } catch (erro) {
+        ui.toast(erro.message, 'erro');
+        b.disabled = false;
+        b.textContent = 'Manifestar';
+      }
     });
   }
 

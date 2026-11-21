@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
     NoEncryption,
@@ -35,6 +36,33 @@ ENDPOINT = "https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDF
 
 LOTES_POR_EXECUCAO = 3      # quantos lotes de 50 por rodada do workflow
 ESPERA_ENTRE_LOTES = 45     # segundos entre lotes
+
+ENDPOINT_EVENTO = "https://www.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx"
+
+MOLDE_EVENTO = """<evento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.00">
+  <infEvento Id="ID{tp_evento}{chave}{seq:02d}">
+    <cOrgao>{cuf}</cOrgao>
+    <tpAmb>{tp_amb}</tpAmb>
+    <CNPJ>{cnpj}</CNPJ>
+    <chNFe>{chave}</chNFe>
+    <dhEvento>{dh_evento}</dhEvento>
+    <tpEvento>{tp_evento}</tpEvento>
+    <nSeqEvento>{seq}</nSeqEvento>
+    <verEvento>1.00</verEvento>
+    <detEvento versao="1.00">
+      <descEvento>{descricao}</descEvento>
+    </detEvento>
+  </infEvento>
+</evento>"""
+
+ENVELOPE_EVENTO = """<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <nfeRecepcaoEvento xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4">
+      <nfeDadosMsg>{evento}</nfeDadosMsg>
+    </nfeRecepcaoEvento>
+  </soap12:Body>
+</soap12:Envelope>"""
 
 CABECALHO = """<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -133,6 +161,35 @@ def baixar_certificado(loja_id):
     if st != 200 or not senha:
         raise RuntimeError("senha do certificado não está no cofre")
     return conteudo, senha
+
+
+
+def chaves_pem(pfx: bytes, senha: str) -> tuple[str, str]:
+    """Devolve (chave_privada_pem, certificado_pem_com_cadeia)."""
+    chave, cert, extras = pkcs12.load_key_and_certificates(pfx, senha.encode())
+    if chave is None or cert is None:
+        raise RuntimeError("certificado inválido")
+
+    cadeia = [cert] + list(extras or [])
+    cert_pem = "".join(c.public_bytes(Encoding.PEM).decode() for c in cadeia)
+    chave_pem = chave.private_bytes(
+        Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+    return chave_pem, cert_pem
+
+
+def contexto_tls_raw(chave_pem: str, cert_pem: str) -> ssl.SSLContext:
+    """Contexto TLS com o certificado em memória (PEM)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cert_path = Path(tmp) / "cert.pem"
+        key_path = Path(tmp) / "key.pem"
+        cert_path.write_text(cert_pem, encoding="utf-8")
+        key_path.write_text(chave_pem, encoding="utf-8")
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+    return ctx
 
 
 def contexto_tls(pfx: bytes, senha: str) -> ssl.SSLContext:
@@ -358,6 +415,64 @@ def atualizar_config_pos_pedido(pedido):
     salvar_config(ult_nsu=novo_ult)
 
 
+
+def assinar_evento(evento_xml: str, chave_pem: str, cert_pem: str) -> str:
+    """Assina o infEvento (XMLDSig enveloped, SHA-1 como no manual da NF-e)."""
+    from lxml import etree
+    from signxml import XMLSigner, methods
+
+    raiz = etree.fromstring(evento_xml.encode("utf-8"))
+    inf = raiz.find("{http://www.portalfiscal.inf.br/nfe}infEvento")
+    id_evento = inf.get("Id")
+
+    assinador = XMLSigner(
+        method=methods.enveloped,
+        signature_algorithm="rsa-sha1",
+        digest_algorithm="sha1",
+        c14n_algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+    )
+    assinado = assinador.sign(inf, key=chave_pem, cert=cert_pem, reference_uri=id_evento)
+    return etree.tostring(raiz, encoding="unicode")
+
+
+def enviar_evento(ctx, evento_assinado: str) -> str:
+    corpo = ENVELOPE_EVENTO.format(evento=evento_assinado).encode("utf-8")
+    req = urllib.request.Request(
+        ENDPOINT_EVENTO, data=corpo, method="POST",
+        headers={"Content-Type": "application/soap+xml; charset=utf-8",
+                 "SOAPAction":
+                     "http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4/nfeRecepcaoEvento"})
+    with urllib.request.urlopen(req, context=ctx, timeout=90) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def manifestar(pedido, ctx, chave_pem, cert_pem):
+    """Envia a Ciência da Emissão e devolve (ok, mensagem)."""
+    chave = (pedido.get("chave") or "").strip()
+    if len(chave) != 44:
+        return False, "chave inválida para manifestar"
+
+    dh = time.strftime("%Y-%m-%dT%H:%M:%S-03:00", time.localtime())
+    evento = MOLDE_EVENTO.format(
+        tp_evento="210210", chave=chave, seq=1, cuf=pedido.get("cuf", "23"),
+        tp_amb=pedido.get("tp_amb", "1"), cnpj=pedido["cnpj"], dh_evento=dh,
+        descricao="Ciencia da Emissao",
+    )
+
+    assinado = assinar_evento(evento, chave_pem, cert_pem)
+    resposta = enviar_evento(ctx, assinado)
+
+    cstat = re.search(r"<cStat>(\d+)</cStat>", resposta)
+    motivo = re.search(r"<xMotivo>([^<]+)</xMotivo>", resposta)
+    codigo = cstat.group(1) if cstat else "?"
+
+    if codigo in {"128", "135", "573"}:
+        return True, f"manifestação registrada (cStat {codigo})"
+    if codigo == "656":
+        return None, "SEFAZ bloqueou (656)"
+    return False, f"cStat {codigo} - {motivo.group(1) if motivo else 'sem motivo'}"
+
+
 def main():
     processados = 0
     vistos = set()
@@ -373,8 +488,36 @@ def main():
             vistos.add(pedido["id"])
         if not pedido:
             break
-        print(f"pedido {pedido['id']} | CNPJ {pedido['cnpj']}")
+        acao = pedido.get("acao") or "baixar"
+        print(f"pedido {pedido['id']} | CNPJ {pedido['cnpj']} | ação {acao}")
         try:
+            if acao == "manifestar":
+                pfx, senha_cert = baixar_certificado(pedido["loja_id"])
+                chave_p, cert_p = chaves_pem(pfx, senha_cert)
+                ctx_http = contexto_tls_raw(cert_p, chave_p)
+                ok, msg = manifestar(pedido, ctx_http, chave_p, cert_p)
+
+                if ok is None:
+                    atualizar_pedido(pedido["id"], status="pendente", mensagem=msg)
+                    continue
+                if not ok:
+                    atualizar_pedido(pedido["id"], status="erro", mensagem=msg)
+                    continue
+
+                # manifestou: busca o XML completo pela chave
+                resposta = consultar(ctx_http, pedido["cnpj"], "0",
+                                     pedido.get("tp_amb", "1"), pedido.get("cuf", "23"),
+                                     pedido.get("chave"))
+                docs = extrair(resposta)
+                ja_existem = nsus_gravados(pedido["cnpj"])
+                gravados = gravar(pedido["loja_id"], pedido["cnpj"], docs, ja_existem,
+                                  usuario_para(pedido["id"])) if docs else 0
+                atualizar_pedido(pedido["id"], status="concluido", documentos=gravados,
+                                 mensagem=f"{msg}; {gravados} documento(s) completo(s)")
+                print(f"  {msg} | XML completo: {gravados}")
+                processados += 1
+                continue
+
             total, continua = processar(pedido)
             if not continua:
                 atualizar_pedido(pedido["id"], status="concluido", documentos=total,
