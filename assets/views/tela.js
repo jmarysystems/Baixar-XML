@@ -20,39 +20,61 @@ export async function render(raiz, ctx) {
 
   const pedidos = await listar('xml_pedidos', { ordem: 'criado_em', asc: false, limite: 10 });
 
+  const opcoesLoja = comCertificado.map((l) => `<option value="${ui.esc(l.id)}"
+      data-cnpj="${ui.esc(l.cnpj_cpf || '')}"
+      data-cuf="${ui.esc((l.codigo_ibge_estado || '').padStart(2, '0'))}">
+      ${ui.esc(l.nome)}</option>`).join('');
+
   raiz.innerHTML = `
     <div class="cartao">
       <div class="cartao-topo"><h2>Baixar XML da SEFAZ</h2></div>
-      <p class="sub">Escolha o estabelecimento (com certificado digital), confirme o CNPJ
-        e o sistema busca os documentos direto na SEFAZ.</p>
+      <p class="sub">Escolha o estabelecimento (com certificado digital) e como quer buscar:
+        pela sequência de documentos (NSU) ou por uma nota específica (chave de acesso).</p>
 
-      <form id="form" class="grade grade-2">
+      <div class="abas" id="abas">
+        <button type="button" class="aba ativa" data-aba="nsu">Por NSU</button>
+        <button type="button" class="aba" data-aba="chave">Por Chave da NF-e</button>
+      </div>
+
+      <form id="form-nsu" data-painel="nsu" class="grade grade-2">
         <label class="campo"><span>Estabelecimento</span>
-          <select name="loja_id" id="loja" required>
-            <option value="">—</option>
-            ${comCertificado.map((l) => `<option value="${ui.esc(l.id)}"
-               data-cnpj="${ui.esc(l.cnpj_cpf || '')}"
-               data-cuf="${ui.esc((l.codigo_ibge_estado || '').padStart(2, '0'))}"
-               data-uf="${ui.esc(l.sigla_estado || '')}">${ui.esc(l.nome)}</option>`).join('')}
+          <select name="loja_id" class="loja" required>
+            <option value="">—</option>${opcoesLoja}
           </select></label>
-
         <label class="campo"><span>CNPJ</span>
-          <input name="cnpj" id="cnpj" placeholder="somente números" required></label>
-
+          <input name="cnpj" class="cnpj" placeholder="somente números" required></label>
         <label class="campo"><span>Último NSU</span>
-          <input name="ult_nsu" id="ult_nsu" value="0"></label>
-
+          <input name="ult_nsu" value="0"></label>
         <label class="campo"><span>Ambiente</span>
           <select name="tp_amb">
             <option value="1">1 - Produção</option>
             <option value="2">2 - Homologação</option>
           </select></label>
-
         ${podeBaixar ? `<div class="linha-acoes campo-largo">
-          <button type="submit" class="botao-primario" id="baixar">Baixar XML</button>
-          <span class="sub" id="status"></span>
+          <button type="submit" class="botao-primario">Baixar por NSU</button>
         </div>` : ''}
       </form>
+
+      <form id="form-chave" data-painel="chave" class="grade grade-2" hidden>
+        <label class="campo"><span>Estabelecimento</span>
+          <select name="loja_id" class="loja" required>
+            <option value="">—</option>${opcoesLoja}
+          </select></label>
+        <label class="campo"><span>CNPJ</span>
+          <input name="cnpj" class="cnpj" placeholder="somente números" required></label>
+        <label class="campo campo-largo"><span>Chave da NF-e (44 dígitos)</span>
+          <input name="chave" maxlength="44" placeholder="ex.: 23260853622664000159550010000002171300002300" required></label>
+        <label class="campo"><span>Ambiente</span>
+          <select name="tp_amb">
+            <option value="1">1 - Produção</option>
+            <option value="2">2 - Homologação</option>
+          </select></label>
+        ${podeBaixar ? `<div class="linha-acoes campo-largo">
+          <button type="submit" class="botao-primario">Baixar pela chave</button>
+        </div>` : ''}
+      </form>
+
+      <div id="status-linha" class="sub" style="margin-top:8px"></div>
     </div>
 
     <div id="andamento"></div>
@@ -80,23 +102,33 @@ export async function render(raiz, ctx) {
       </table></div>` : ui.vazio('Nenhum XML baixado ainda.')}
     </div>`;
 
-  const selLoja = raiz.querySelector('#loja');
-  const campoCnpj = raiz.querySelector('#cnpj');
-  const campoNsu = raiz.querySelector('#ult_nsu');
-  const status = raiz.querySelector('#status');
+  // ---------------------------------------------------------------- abas
+  const abas = raiz.querySelectorAll('#abas .aba');
+  for (const aba of abas) {
+    aba.addEventListener('click', () => {
+      for (const a of abas) a.classList.toggle('ativa', a === aba);
+      for (const painel of raiz.querySelectorAll('[data-painel]')) {
+        painel.hidden = painel.dataset.painel !== aba.dataset.aba;
+      }
+    });
+  }
+
+  // ------------------------------------------------- CNPJ automático
+  for (const form of raiz.querySelectorAll('form[data-painel]')) {
+    const selLoja = form.querySelector('.loja');
+    const campoCnpj = form.querySelector('.cnpj');
+    selLoja.addEventListener('change', () => {
+      const cnpj = (selLoja.selectedOptions[0]?.dataset.cnpj || '').replace(/\D/g, '');
+      if (cnpj) campoCnpj.value = cnpj;
+    });
+  }
+
   const andamento = raiz.querySelector('#andamento');
-
-  selLoja.addEventListener('change', () => {
-    const opcao = selLoja.selectedOptions[0];
-    const cnpj = (opcao?.dataset.cnpj || '').replace(/\D/g, '');
-    if (cnpj) campoCnpj.value = cnpj;
-  });
-
+  const statusLinha = raiz.querySelector('#status-linha');
   let intervalo = null;
 
   function acompanhar(pedidoId) {
     if (intervalo) clearInterval(intervalo);
-
     intervalo = setInterval(async () => {
       const { data } = await sb.from('xml_pedidos').select('*').eq('id', pedidoId).maybeSingle();
       if (!data) return;
@@ -104,44 +136,56 @@ export async function render(raiz, ctx) {
       if (data.status === 'concluido') {
         clearInterval(intervalo);
         andamento.innerHTML = `<div class="cartao" style="border-color:#bfe3cd">
-          <strong>✅ Concluído</strong> — ${ui.esc(data.mensagem || 'documentos baixados')}
-        </div>`;
-        status.textContent = '';
+          <strong>✅ Concluído</strong> — ${ui.esc(data.mensagem || '')}</div>`;
+        statusLinha.textContent = '';
         setTimeout(() => ctx.recarregar(), 1200);
       } else if (data.status === 'erro') {
         clearInterval(intervalo);
         andamento.innerHTML = `<div class="cartao" style="border-color:#f3c6c2">
-          <strong>⚠️ Não foi possível baixar</strong> — ${ui.esc(data.mensagem || 'erro')}
-        </div>`;
-        status.textContent = '';
-        const botao = raiz.querySelector('#baixar');
-        if (botao) { botao.disabled = false; botao.textContent = 'Baixar XML'; }
+          <strong>⚠️ Não foi possível baixar</strong> — ${ui.esc(data.mensagem || 'erro')}</div>`;
+        statusLinha.textContent = '';
+        liberarBotoes();
       } else if (data.status === 'pendente' && data.mensagem) {
         andamento.innerHTML = `<div class="cartao">
           <strong>⏳ Na fila</strong> — ${ui.esc(data.mensagem)}.
-          O sistema tenta de novo automaticamente.
-        </div>`;
+          O sistema tenta de novo automaticamente.</div>`;
       } else {
         andamento.innerHTML = `<div class="cartao">
-          <strong>⏳ Processando…</strong> — buscando os documentos na SEFAZ.
-        </div>`;
+          <strong>⏳ Processando…</strong> — buscando os documentos na SEFAZ.</div>`;
       }
     }, 5000);
   }
 
-  raiz.querySelector('#form').addEventListener('submit', async (ev) => {
+  function liberarBotoes() {
+    for (const b of raiz.querySelectorAll('button[type="submit"]')) {
+      b.disabled = false;
+      b.textContent = b.dataset.rotulo;
+    }
+  }
+
+  for (const b of raiz.querySelectorAll('button[type="submit"]')) {
+    b.dataset.rotulo = b.textContent;
+  }
+
+  // ------------------------------------------------------------ envio
+  async function enviar(ev, porChave) {
     ev.preventDefault();
-    const dados = new FormData(ev.target);
+    const form = ev.target;
+    const dados = new FormData(form);
     const lojaId = dados.get('loja_id');
     const cnpj = String(dados.get('cnpj') || '').replace(/\D/g, '');
-    const ultNsu = String(dados.get('ult_nsu') || '0').replace(/\D/g, '') || '0';
     const tpAmb = String(dados.get('tp_amb') || '1');
-    const opcao = selLoja.selectedOptions[0];
+    const cuf = (form.querySelector('.loja').selectedOptions[0]?.dataset.cuf || '23').slice(0, 2);
+    const chave = porChave ? String(dados.get('chave') || '').replace(/\D/g, '') : null;
 
     if (!lojaId) { ui.toast('Escolha o estabelecimento.', 'erro'); return; }
     if (cnpj.length !== 14) { ui.toast('Informe um CNPJ com 14 dígitos.', 'erro'); return; }
+    if (porChave && chave.length !== 44) {
+      ui.toast('A chave da NF-e tem 44 dígitos.', 'erro');
+      return;
+    }
 
-    const botao = raiz.querySelector('#baixar');
+    const botao = form.querySelector('button[type="submit"]');
     botao.disabled = true;
     botao.textContent = 'Enviando…';
 
@@ -149,26 +193,29 @@ export async function render(raiz, ctx) {
       const pedido = await criar('xml_pedidos', {
         loja_id: lojaId,
         cnpj,
-        ult_nsu: ultNsu,
+        chave,
+        ult_nsu: porChave ? '0' : (String(dados.get('ult_nsu') || '0').replace(/\D/g, '') || '0'),
         tp_amb: tpAmb,
-        cuf: (opcao?.dataset.cuf || '23').slice(0, 2),
+        cuf,
         criado_por: ctx.perfil?.id || null,
       });
 
       andamento.innerHTML = `<div class="cartao">
-        <strong>⏳ Processando…</strong> — buscando os documentos na SEFAZ.
-        Pode levar alguns minutos.</div>`;
-      if (status) status.textContent = 'pedido enviado';
+        <strong>⏳ Processando…</strong> — buscando na SEFAZ. Pode levar alguns minutos.</div>`;
+      statusLinha.textContent = porChave ? 'pedido pela chave enviado' : 'pedido por NSU enviado';
       botao.textContent = 'Aguarde…';
-
       acompanhar(pedido.id);
     } catch (erro) {
       ui.toast(erro.message, 'erro');
       botao.disabled = false;
-      botao.textContent = 'Baixar XML';
+      botao.textContent = botao.dataset.rotulo;
     }
-  });
+  }
 
+  raiz.querySelector('#form-nsu').addEventListener('submit', (ev) => enviar(ev, false));
+  raiz.querySelector('#form-chave').addEventListener('submit', (ev) => enviar(ev, true));
+
+  // ------------------------------------------------------- visualizar
   for (const b of raiz.querySelectorAll('[data-ver]')) {
     b.addEventListener('click', () => {
       const doc = baixados.find((d) => d.id === b.dataset.ver);
@@ -203,11 +250,10 @@ export async function render(raiz, ctx) {
     });
   }
 
-  // pedido ainda em andamento ao abrir a tela
   const ativo = pedidos.find((p) => p.status === 'pendente' || p.status === 'processando');
   if (ativo) {
-    andamento.innerHTML = `<div class="cartao"><strong>⏳ Processando…</strong>
-      — pedido de ${ui.dataHoraBR(ativo.criado_em)}.</div>`;
+    andamento.innerHTML = `<div class="cartao"><strong>⏳ Em andamento</strong>
+      — pedido de ${ui.dataHoraBR(ativo.criado_em)}${ativo.chave ? ' (por chave)' : ' (por NSU)'}.</div>`;
     acompanhar(ativo.id);
   }
 }

@@ -49,6 +49,13 @@ CABECALHO = """<?xml version="1.0" encoding="utf-8"?>
   </soap12:Body>
 </soap12:Envelope>"""
 
+MOLDE_CHAVE = """        <distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01">
+          <tpAmb>{tp_amb}</tpAmb>
+          <cUFAutor>{cuf}</cUFAutor>
+          <CNPJ>{cnpj}</CNPJ>
+          <consChNFe><chNFe>{chave}</chNFe></consChNFe>
+        </distDFeInt>"""
+
 MOLDE_NSU = """        <distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01">
           <tpAmb>{tp_amb}</tpAmb>
           <cUFAutor>{cuf}</cUFAutor>
@@ -146,8 +153,12 @@ def contexto_tls(pfx: bytes, senha: str) -> ssl.SSLContext:
     return ctx
 
 
-def consultar(ctx, cnpj, ult_nsu, tp_amb, cuf):
-    dados = MOLDE_NSU.format(tp_amb=tp_amb, cuf=cuf, cnpj=cnpj, ult_nsu=ult_nsu.zfill(15))
+def consultar(ctx, cnpj, ult_nsu, tp_amb, cuf, chave=None):
+    if chave:
+        dados = MOLDE_CHAVE.format(tp_amb=tp_amb, cuf=cuf, cnpj=cnpj, chave=chave)
+    else:
+        dados = MOLDE_NSU.format(tp_amb=tp_amb, cuf=cuf, cnpj=cnpj,
+                                 ult_nsu=ult_nsu.zfill(15))
     corpo = CABECALHO.format(dados=dados).encode()
     req = urllib.request.Request(
         ENDPOINT, data=corpo, method="POST",
@@ -224,6 +235,27 @@ def processar(pedido):
         if salvo:
             ult = salvo.zfill(15)
             print(f"  retomando do NSU {ult}")
+
+    chave_pedido = (pedido.get("chave") or "").strip() or None
+    if chave_pedido:
+        print(f"  consulta pela chave {chave_pedido}")
+        resposta = consultar(ctx, cnpj, ult, pedido.get("tp_amb", "1"),
+                             pedido.get("cuf", "23"), chave_pedido)
+        cstat = re.search(r"<cStat>(\d+)</cStat>", resposta)
+        cstat = cstat.group(1) if cstat else "?"
+        motivo = re.search(r"<xMotivo>([^<]+)</xMotivo>", resposta)
+
+        if cstat == "656":
+            print("  SEFAZ bloqueou (656) — devolvendo para a fila")
+            atualizar_pedido(pedido["id"], status="pendente",
+                             mensagem="Aguardando o limite da SEFAZ liberar")
+            return 0, True
+
+        docs = extrair(resposta)
+        gravados = gravar(pedido["loja_id"], cnpj, docs, ja_existem, criado_por) if docs else 0
+        print(f"  chave: {len(docs)} documento(s), {gravados} novo(s) "
+              f"(cStat {cstat}{' - ' + motivo.group(1) if motivo else ''})")
+        return gravados, False
 
     total = 0
     for lote in range(1, LOTES_POR_EXECUCAO + 1):
