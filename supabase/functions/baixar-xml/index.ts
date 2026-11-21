@@ -52,6 +52,7 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method !== "POST") return json({ erro: "Use POST." }, 405);
 
+  let certificadosNaCadeia = 0;
   try {
     const auth = req.headers.get("Authorization") || "";
     if (!auth.startsWith("Bearer ")) return json({ erro: "Não autenticado." }, 401);
@@ -125,8 +126,19 @@ Deno.serve(async (req) => {
 
     if (!chaves.length || !certs.length) return json({ erro: "Certificado inválido." }, 400);
 
-    const chavePem = forge.pki.privateKeyToPem(chaves[0].key);
-    const certPem = forge.pki.certificateToPem(certs[0].cert);
+    const chave = chaves[0].key as forge.pki.rsa.PrivateKey;
+    const chavePem = forge.pki.privateKeyToPem(chave);
+
+    // A SEFAZ exige a cadeia completa (folha + intermediários da ICP-Brasil).
+    // A folha é o certificado cuja chave pública casa com a chave privada.
+    const ehFolha = (bag: { cert: forge.pki.Certificate }) => {
+      const pub = bag.cert.publicKey as forge.pki.rsa.PublicKey | undefined;
+      return !!pub?.n && !!chave?.n && pub.n.equals(chave.n);
+    };
+
+    const folha = certs.find(ehFolha) ?? certs[0];
+    const cadeia = [folha, ...certs.filter((c) => c !== folha)];
+    const certPem = cadeia.map((c) => forge.pki.certificateToPem(c.cert)).join("\n");
 
     // ---------------------------------------------------------- TLS mútuo
     const criarCliente = (Deno as unknown as {
@@ -151,6 +163,7 @@ Deno.serve(async (req) => {
       http11 = false;
       cliente = criarCliente.call(Deno, { cert: certPem, key: chavePem });
     }
+    certificadosNaCadeia = (certPem.match(/BEGIN CERTIFICATE/g) || []).length;
 
     const soap = envelope(cnpj, ultNsu, tpAmb, cuf, chave);
     const resposta = await fetch(ENDPOINT, {
@@ -205,12 +218,12 @@ Deno.serve(async (req) => {
   } catch (erro) {
     console.error(erro);
     const mensagem = String((erro as Error)?.message ?? erro);
+
     if (/HTTP\/1\.1|http2/i.test(mensagem)) {
       return json({
-        erro:
-          "A SEFAZ recusa HTTP/2 e este runtime insistiu nele. " +
-          "Use o script baixar_xml_sefaz.py no computador com o certificado.",
+        erro: "Falha de conexão com a SEFAZ.",
         detalhe: mensagem.slice(0, 300),
+        certificados_na_cadeia: certificadosNaCadeia,
       }, 500);
     }
     return json({ erro: mensagem }, 500);
