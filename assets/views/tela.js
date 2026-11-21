@@ -1,6 +1,6 @@
-import { listar, criar } from '../api.js?v=20261121d';
-import { sb } from '../api.js?v=20261121d';
-import * as ui from '../ui.js?v=20261121d';
+import { listar, criar } from '../api.js?v=20261121e';
+import { sb } from '../api.js?v=20261121e';
+import * as ui from '../ui.js?v=20261121e';
 
 // Prazo da manifestação do destinatário: 15 dias a partir da emissão
 const DIAS_PRAZO = 15;
@@ -16,15 +16,19 @@ function prazoManifestacao(d) {
   const dias = Math.floor((prazo - hoje) / (24 * 60 * 60 * 1000));
 
   if (dias < 0) {
-    return { classe: 'badge-vermelho', texto: `não manifestada · vencido há ${Math.abs(dias)}d` };
+    return {
+      classe: 'badge-vermelho',
+      texto: `não manifestada · vencido há ${Math.abs(dias)}d`,
+      vencida: true,
+    };
   }
   if (dias === 0) {
-    return { classe: 'badge-laranja', texto: 'vence hoje' };
+    return { classe: 'badge-laranja', texto: 'vence hoje', vencida: false };
   }
   if (dias <= 5) {
-    return { classe: 'badge-amarelo', texto: `faltam ${dias} dia(s)` };
+    return { classe: 'badge-amarelo', texto: `faltam ${dias} dia(s)`, vencida: false };
   }
-  return { classe: 'badge-verde', texto: `faltam ${dias} dias` };
+  return { classe: 'badge-verde', texto: `faltam ${dias} dias`, vencida: false };
 }
 
 export async function render(raiz, ctx) {
@@ -142,15 +146,23 @@ export async function render(raiz, ctx) {
 
     <div class="cartao">
       <div class="cartao-topo"><h2><span id="contador">${baixados.length}</span> documento(s) baixado(s)</h2></div>
-      <label class="campo" style="max-width:420px"><span>Pesquisar</span>
-        <input type="search" id="busca-docs"
-               placeholder="NSU, chave da NF-e, CNPJ ou tipo"></label>
+      <div class="grade grade-2" style="max-width:720px">
+        <label class="campo"><span>Pesquisar</span>
+          <input type="search" id="busca-docs"
+                 placeholder="NSU, chave, CNPJ do emitente ou destinatário, nome ou tipo"></label>
+        <label class="campo"><span>Filtrar</span>
+          <select id="filtro-prazo">
+            <option value="todos">Todos os documentos</option>
+            <option value="vencidas">Não manifestadas — prazo vencido</option>
+            <option value="no_prazo">Não manifestadas — dentro do prazo</option>
+          </select></label>
+      </div>
       ${baixados.length ? `<div class="tabela-rolagem"><table>
         <thead><tr><th>CNPJ</th><th>Emitente</th><th>Chave</th><th>Tipo</th><th>Emissão</th>
           <th>Prazo de manifestação</th><th>Manifestação</th><th>NSU</th>
           <th>Estabelecimento</th><th>Baixado em</th><th></th></tr></thead>
         <tbody>
-          ${baixados.map((d) => `<tr data-busca="${ui.esc(
+          ${baixados.map((d) => `<tr data-id="${ui.esc(d.id)}" data-busca="${ui.esc(
             `${d.nsu || ''} ${d.chave || ''} ${d.cnpj || ''} ${d.tipo || ''} ` +
             `${d.emitente_cnpj || ''} ${d.emitente_nome || ''} ${d.schema || ''}`
               .toLowerCase())}">
@@ -373,21 +385,39 @@ export async function render(raiz, ctx) {
 
   // --------------------------------------------- pesquisa nos baixados
   const buscaDocs = raiz.querySelector('#busca-docs');
+  const filtroPrazo = raiz.querySelector('#filtro-prazo');
   const contador = raiz.querySelector('#contador');
-  if (buscaDocs) {
-    buscaDocs.addEventListener('input', () => {
-      const termo = buscaDocs.value.trim().toLowerCase();
-      let visiveis = 0;
-      for (const tr of raiz.querySelectorAll('tr[data-busca]')) {
-        const mostra = !termo || tr.dataset.busca.includes(termo);
-        tr.hidden = !mostra;
-        if (mostra) visiveis += 1;
-      }
-      if (contador) {
-        contador.textContent = termo ? `${visiveis} de ${baixados.length}` : baixados.length;
-      }
-    });
+
+  const categorias = new Map();
+  for (const d of baixados) {
+    const p = prazoManifestacao(d);
+    categorias.set(d.id, p ? (p.vencida ? 'vencidas' : 'no_prazo') : 'outros');
   }
+
+  function aplicarFiltros() {
+    const termo = (buscaDocs?.value || '').trim().toLowerCase();
+    const modo = filtroPrazo?.value || 'todos';
+    let visiveis = 0;
+
+    for (const tr of raiz.querySelectorAll('tr[data-busca]')) {
+      const id = tr.dataset.id;
+      const categoria = categorias.get(id) || 'outros';
+      const casaTexto = !termo || tr.dataset.busca.includes(termo);
+      const casaPrazo = modo === 'todos' || categoria === modo;
+      const mostra = casaTexto && casaPrazo;
+
+      tr.hidden = !mostra;
+      if (mostra) visiveis += 1;
+    }
+
+    if (contador) {
+      const filtrando = !!termo || modo !== 'todos';
+      contador.textContent = filtrando ? `${visiveis} de ${baixados.length}` : baixados.length;
+    }
+  }
+
+  buscaDocs?.addEventListener('input', aplicarFiltros);
+  filtroPrazo?.addEventListener('change', aplicarFiltros);
 
   // ------------------------------------------------- download automático
   const caixaAuto = raiz.querySelector('#auto');
