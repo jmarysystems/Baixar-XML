@@ -1,6 +1,31 @@
-import { listar, criar } from '../api.js?v=20261121b';
-import { sb } from '../api.js?v=20261121b';
-import * as ui from '../ui.js?v=20261121b';
+import { listar, criar } from '../api.js?v=20261121c';
+import { sb } from '../api.js?v=20261121c';
+import * as ui from '../ui.js?v=20261121c';
+
+// Prazo da manifestação do destinatário: 15 dias a partir da emissão
+const DIAS_PRAZO = 15;
+
+function prazoManifestacao(d) {
+  if (!(d.tipo || '').startsWith('resNFe') || !d.emitida_em) return null;
+
+  const emissao = new Date(d.emitida_em);
+  if (Number.isNaN(emissao.getTime())) return null;
+
+  const prazo = new Date(emissao.getTime() + DIAS_PRAZO * 24 * 60 * 60 * 1000);
+  const hoje = new Date();
+  const dias = Math.floor((prazo - hoje) / (24 * 60 * 60 * 1000));
+
+  if (dias < 0) {
+    return { classe: 'badge-vermelho', texto: `não manifestada · vencido há ${Math.abs(dias)}d` };
+  }
+  if (dias === 0) {
+    return { classe: 'badge-laranja', texto: 'vence hoje' };
+  }
+  if (dias <= 5) {
+    return { classe: 'badge-amarelo', texto: `faltam ${dias} dia(s)` };
+  }
+  return { classe: 'badge-verde', texto: `faltam ${dias} dias` };
+}
 
 export async function render(raiz, ctx) {
   ctx.setTitulo('Baixar XML');
@@ -122,7 +147,7 @@ export async function render(raiz, ctx) {
                placeholder="NSU, chave da NF-e, CNPJ ou tipo"></label>
       ${baixados.length ? `<div class="tabela-rolagem"><table>
         <thead><tr><th>CNPJ</th><th>Chave</th><th>Tipo</th><th>Emissão</th>
-          <th>Manifestação</th><th>NSU</th>
+          <th>Prazo de manifestação</th><th>Manifestação</th><th>NSU</th>
           <th>Estabelecimento</th><th>Baixado em</th><th></th></tr></thead>
         <tbody>
           ${baixados.map((d) => `<tr data-busca="${ui.esc(
@@ -132,6 +157,10 @@ export async function render(raiz, ctx) {
             <td class="mono">${ui.esc(d.chave || '—')}</td>
             <td>${ui.esc(d.tipo || d.schema || '—')}</td>
             <td>${d.emitida_em ? ui.dataBR(d.emitida_em) : '—'}</td>
+            <td>${(() => {
+              const p = prazoManifestacao(d);
+              return p ? `<span class="badge ${p.classe}">${ui.esc(p.texto)}</span>` : '—';
+            })()}</td>
             <td>${(d.tipo || '').startsWith('resNFe') && d.chave
               ? `<button type="button" class="botao-pequeno"
                         data-manifestar="${ui.esc(d.chave)}"
