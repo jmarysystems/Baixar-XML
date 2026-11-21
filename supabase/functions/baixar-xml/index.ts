@@ -142,7 +142,15 @@ Deno.serve(async (req) => {
       }, 501);
     }
 
-    const cliente = criarCliente.call(Deno, { cert: certPem, key: chavePem });
+    // A SEFAZ só aceita HTTP/1.1: desliga o HTTP/2 no cliente TLS
+    let cliente: unknown;
+    let http11 = true;
+    try {
+      cliente = criarCliente.call(Deno, { cert: certPem, key: chavePem, http2: false });
+    } catch {
+      http11 = false;
+      cliente = criarCliente.call(Deno, { cert: certPem, key: chavePem });
+    }
 
     const soap = envelope(cnpj, ultNsu, tpAmb, cuf, chave);
     const resposta = await fetch(ENDPOINT, {
@@ -158,7 +166,11 @@ Deno.serve(async (req) => {
 
     const texto = await resposta.text();
     if (!resposta.ok) {
-      return json({ erro: `SEFAZ respondeu ${resposta.status}`, detalhe: texto.slice(0, 500) }, 502);
+      return json({
+        erro: `SEFAZ respondeu ${resposta.status}`,
+        detalhe: texto.slice(0, 500),
+        http11,
+      }, 502);
     }
 
     // ---------------------------------------------------------- parse
@@ -192,6 +204,15 @@ Deno.serve(async (req) => {
     return json({ ok: true, ult_nsu: ultimoNsu, documentos });
   } catch (erro) {
     console.error(erro);
-    return json({ erro: String((erro as Error)?.message ?? erro) }, 500);
+    const mensagem = String((erro as Error)?.message ?? erro);
+    if (/HTTP\/1\.1|http2/i.test(mensagem)) {
+      return json({
+        erro:
+          "A SEFAZ recusa HTTP/2 e este runtime insistiu nele. " +
+          "Use o script baixar_xml_sefaz.py no computador com o certificado.",
+        detalhe: mensagem.slice(0, 300),
+      }, 500);
+    }
+    return json({ erro: mensagem }, 500);
   }
 });
