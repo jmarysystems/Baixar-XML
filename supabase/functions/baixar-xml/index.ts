@@ -1,14 +1,13 @@
 // =====================================================================
-// baixar-xml — consulta o NFeDistribuicaoDFe da SEFAZ
+// baixar-xml (v5) — consulta o NFeDistribuicaoDFe da SEFAZ
 //
-// IMPORTANTE: a SEFAZ exige TLS mútuo (certificado do cliente). O runtime
-// das Edge Functions só consegue isso se `Deno.createHttpClient` estiver
-// disponível; quando não estiver, a função responde explicando que a
-// consulta precisa ser feita por um host com o certificado (o script
-// tools/baixar_xml_sefaz.py roda no seu computador e cumpre o papel).
+// • Certificado e senha vêm do bucket privado + Vault (nunca do app)
+// • TLS mútuo com a cadeia completa de certificados
+// • Responde sempre JSON; inclui "versao" para conferir o que está no ar
 // =====================================================================
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import forge from "npm:node-forge@1.3.1";
+
+const VERSAO = "v5";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -16,31 +15,42 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const json = (corpo: unknown, status = 200) =>
-  new Response(JSON.stringify(corpo), {
+const responder = (corpo: unknown, status = 200) =>
+  new Response(JSON.stringify({ versao: VERSAO, ...(corpo as object) }), {
     status,
     headers: { ...CORS, "Content-Type": "application/json" },
   });
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 
 const ENDPOINT =
   "https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx";
 
-function envelope(cnpj: string, ultNsu: string, tpAmb: string, cUF: string, chave?: string | null) {
+function montarEnvelope(
+  cnpj: string,
+  ultNsu: string,
+  tpAmb: string,
+  cuf: string,
+  chave: string | null,
+): string {
+  const consulta = chave
+    ? `<consChNFe><chNFe>${chave}</chNFe></consChNFe>`
+    : `<distNSU><ultNSU>${ultNsu.padStart(15, "0")}</ultNSU></distNSU>`;
+
   return `<?xml version="1.0" encoding="utf-8"?>
-<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                 xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
     <nfeDistDFeInteresse xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe">
       <nfeDadosMsg>
         <distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01">
           <tpAmb>${tpAmb}</tpAmb>
-          <cUFAutor>${cUF}</cUFAutor>
+          <cUFAutor>${cuf}</cUFAutor>
           <CNPJ>${cnpj}</CNPJ>
-          ${chave ? `<consChNFe><chNFe>${chave}</chNFe></consChNFe>`
-                 : `<distNSU><ultNSU>${ultNsu.padStart(15, "0")}</ultNSU></distNSU>`}
+          ${consulta}
         </distDFeInt>
       </nfeDadosMsg>
     </nfeDistDFeInteresse>
@@ -50,95 +60,112 @@ function envelope(cnpj: string, ultNsu: string, tpAmb: string, cUF: string, chav
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
-  if (req.method !== "POST") return json({ erro: "Use POST." }, 405);
+  if (req.method !== "POST") return responder({ erro: "Use POST." }, 405);
+  if (req.method === "GET") return responder({ ok: true, versao: VERSAO });
 
   let certificadosNaCadeia = 0;
-  try {
-    const auth = req.headers.get("Authorization") || "";
-    if (!auth.startsWith("Bearer ")) return json({ erro: "Não autenticado." }, 401);
 
-    const clienteUsuario = createClient(SUPABASE_URL, ANON_KEY, {
+  try {
+    // ---------------------------------------------------------- acesso
+    if (!SUPABASE_URL || !SERVICE_KEY || !ANON_KEY) {
+      return responder({
+        erro: "Configuração incompleta: falta SUPABASE_SERVICE_ROLE_KEY.",
+      }, 500);
+    }
+
+    const auth = req.headers.get("Authorization") ?? "";
+    if (!auth.startsWith("Bearer ")) return responder({ erro: "Não autenticado." }, 401);
+
+    const comoUsuario = createClient(SUPABASE_URL, ANON_KEY, {
       global: { headers: { Authorization: auth } },
       auth: { persistSession: false },
     });
 
-    const { data: { user } } = await clienteUsuario.auth.getUser();
-    if (!user) return json({ erro: "Sessão inválida." }, 401);
+    const { data: usuario } = await comoUsuario.auth.getUser();
+    if (!usuario?.user) return responder({ erro: "Sessão inválida." }, 401);
 
-    const { data: pode } = await clienteUsuario.rpc("pode_no_modulo", {
+    const { data: pode } = await comoUsuario.rpc("pode_no_modulo", {
       p_modulo: "xml",
       p_acao: "cadastrar",
     });
-    if (!pode) return json({ erro: "Sem permissão para baixar XML." }, 403);
+    if (!pode) return responder({ erro: "Sem permissão para baixar XML." }, 403);
 
+    // ---------------------------------------------------------- entrada
     const corpo = await req.json().catch(() => null);
-    const lojaId: string | undefined = corpo?.loja_id;
+    const lojaId = String(corpo?.loja_id ?? "");
     const cnpj = String(corpo?.cnpj ?? "").replace(/\D/g, "");
     const ultNsu = String(corpo?.ult_nsu ?? "0").replace(/\D/g, "") || "0";
     const tpAmb = String(corpo?.tp_amb ?? "1");
-    const cuf = String(corpo?.cuf ?? "23").replace(/\D/g, "").slice(0, 2) || "23";
+    const cuf = (String(corpo?.cuf ?? "23").replace(/\D/g, "") || "23").slice(0, 2);
+    const chaveNota = String(corpo?.chave ?? "").replace(/\D/g, "") || null;
 
-    const chave = String(corpo?.chave ?? "").replace(/\D/g, "") || null;
+    if (!lojaId || cnpj.length !== 14) {
+      return responder({ erro: "Informe loja_id e CNPJ." }, 400);
+    }
 
-    if (!lojaId || cnpj.length !== 14) return json({ erro: "Informe loja_id e CNPJ." }, 400);
-
+    // ---------------------------------------------------------- certificado
     const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
       auth: { persistSession: false },
     });
 
-    const { data: loja, error: erroLoja } = await admin
+    const { data: loja } = await admin
       .from("arm_lojas")
-      .select("id, nome, certificado_caminho, certificado_validade, ambiente")
+      .select("id, nome, certificado_caminho, certificado_validade")
       .eq("id", lojaId)
-      .single();
+      .maybeSingle();
 
-    if (erroLoja || !loja?.certificado_caminho) {
-      return json({ erro: "Estabelecimento sem certificado digital." }, 400);
+    if (!loja?.certificado_caminho) {
+      return responder({ erro: "Estabelecimento sem certificado digital." }, 400);
     }
 
     const { data: arquivo } = await admin.storage
       .from("certificados")
       .download(loja.certificado_caminho);
 
+    if (!arquivo) return responder({ erro: "Não foi possível ler o certificado." }, 500);
+
     const { data: senha } = await admin.rpc("certificado_senha_ler", { p_loja_id: lojaId });
-    if (!arquivo || !senha) {
-      return json({ erro: "Certificado ou senha não encontrados no cofre." }, 400);
-    }
+    if (!senha) return responder({ erro: "Senha do certificado não está no cofre." }, 400);
 
-    // ---------------------------------------------------------- abre o .pfx
+    // ---------------------------------------------------------- pfx
+    const forge = (await import("npm:node-forge@1.3.1")).default;
+
     const bytes = new Uint8Array(await arquivo.arrayBuffer());
-    let bin = "";
-    for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+    let binario = "";
+    for (let i = 0; i < bytes.length; i += 1) binario += String.fromCharCode(bytes[i]);
 
-    let p12: forge.pkcs12.Pkcs12Pfx;
+    let p12;
     try {
-      p12 = forge.pkcs12.pkcs12FromAsn1(forge.asn1.fromDer(bin), senha as string);
+      p12 = forge.pkcs12.pkcs12FromAsn1(forge.asn1.fromDer(binario), senha as string);
     } catch {
-      return json({ erro: "Senha do certificado incorreta." }, 400);
+      return responder({ erro: "Senha do certificado incorreta." }, 400);
     }
 
-    const chaves = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[
-      forge.pki.oids.pkcs8ShroudedKeyBag
-    ] || [];
-    const certs = p12.getBags({ bagType: forge.pki.oids.certBag })[
-      forge.pki.oids.certBag
-    ] || [];
+    const bagsChave =
+      p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[
+        forge.pki.oids.pkcs8ShroudedKeyBag
+      ] ?? [];
+    const bagsCert =
+      p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] ?? [];
 
-    if (!chaves.length || !certs.length) return json({ erro: "Certificado inválido." }, 400);
+    if (!bagsChave.length || !bagsCert.length) {
+      return responder({ erro: "Certificado inválido." }, 400);
+    }
 
-    const chavePrivada = chaves[0].key as forge.pki.rsa.PrivateKey;
+    const chavePrivada = bagsChave[0].key;
     const chavePem = forge.pki.privateKeyToPem(chavePrivada);
 
-    // A SEFAZ exige a cadeia completa (folha + intermediários da ICP-Brasil).
-    // A folha é o certificado cuja chave pública casa com a chave privada.
-    const ehFolha = (bag: { cert: forge.pki.Certificate }) => {
-      const pub = bag.cert.publicKey as forge.pki.rsa.PublicKey | undefined;
-      return !!pub?.n && !!chavePrivada?.n && pub.n.equals(chavePrivada.n);
+    // cadeia: folha (chave casa com a privada) + intermediários
+    const ehFolha = (bag: { cert: { publicKey?: { n?: { equals: (v: unknown) => boolean } } } }) => {
+      const pub = bag.cert.publicKey;
+      const n = chavePrivada?.n;
+      return !!(pub?.n && n && pub.n.equals(n));
     };
 
-    const folha = certs.find(ehFolha) ?? certs[0];
-    const cadeia = [folha, ...certs.filter((c) => c !== folha)];
+    const folha = bagsCert.find(ehFolha) ?? bagsCert[0];
+    const cadeia = [folha, ...bagsCert.filter((c) => c !== folha)];
     const certPem = cadeia.map((c) => forge.pki.certificateToPem(c.cert)).join("\n");
+    certificadosNaCadeia = cadeia.length;
 
     // ---------------------------------------------------------- TLS mútuo
     const criarCliente = (Deno as unknown as {
@@ -146,50 +173,50 @@ Deno.serve(async (req) => {
     }).createHttpClient;
 
     if (typeof criarCliente !== "function") {
-      return json({
-        erro:
-          "Este runtime não suporta certificado de cliente (TLS mútuo). " +
-          "Use o script tools/baixar_xml_sefaz.py no computador que tem o certificado.",
+      return responder({
+        erro: "Este runtime não suporta certificado de cliente (TLS mútuo).",
         precisa_cliente_local: true,
       }, 501);
     }
 
-    // A SEFAZ só aceita HTTP/1.1: desliga o HTTP/2 no cliente TLS
     let cliente: unknown;
-    let http11 = true;
     try {
       cliente = criarCliente.call(Deno, { cert: certPem, key: chavePem, http2: false });
     } catch {
-      http11 = false;
       cliente = criarCliente.call(Deno, { cert: certPem, key: chavePem });
     }
-    certificadosNaCadeia = (certPem.match(/BEGIN CERTIFICATE/g) || []).length;
 
-    const soap = envelope(cnpj, ultNsu, tpAmb, cuf, chave);
+    // ---------------------------------------------------------- consulta
+    const soap = montarEnvelope(cnpj, ultNsu, tpAmb, cuf, chaveNota);
+    const inicio = Date.now();
+
     const resposta = await fetch(ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/soap+xml; charset=utf-8",
-        "SOAPAction": "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse",
+        "SOAPAction":
+          "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse",
       },
       body: soap,
-      // @ts-ignore: client TLS é extensão do Deno, fora do tipo padrão
+      // @ts-ignore client TLS é extensão do Deno
       client: cliente,
     });
 
     const texto = await resposta.text();
     if (!resposta.ok) {
-      return json({
-        erro: `SEFAZ respondeu ${resposta.status}`,
-        detalhe: texto.slice(0, 500),
-        http11,
+      return responder({
+        erro: `SEFAZ respondeu HTTP ${resposta.status}`,
+        detalhe: texto.slice(0, 400),
+        certificados_na_cadeia: certificadosNaCadeia,
       }, 502);
     }
 
     // ---------------------------------------------------------- parse
     const documentos: unknown[] = [];
-    const blocos = texto.match(/<docZip[^>]*>[^<]+<\/docZip>/g) || [];
+    const blocos = texto.match(/<docZip[^>]*>[^<]+<\/docZip>/g) ?? [];
     const ultimoNsu = /<ultNSU>(\d+)<\/ultNSU>/.exec(texto)?.[1] ?? ultNsu;
+    const cStat = /<cStat>(\d+)<\/cStat>/.exec(texto)?.[1] ?? null;
+    const xMotivo = /<xMotivo>([^<]+)<\/xMotivo>/.exec(texto)?.[1] ?? null;
 
     for (const bloco of blocos) {
       const nsu = /NSU="(\d+)"/.exec(bloco)?.[1] ?? null;
@@ -206,7 +233,7 @@ Deno.serve(async (req) => {
           nsu,
           schema,
           tipo: schema?.startsWith("procNFe") ? "NF-e" : (schema ?? "documento"),
-          chave: /Id="NFe(\d{44})"/.exec(xml)?.[1] ?? /(\d{44})/.exec(schema ?? "")?.[1] ?? null,
+          chave: /Id="NFe(\d{44})"/.exec(xml)?.[1] ?? null,
           xml,
         });
       } catch {
@@ -214,18 +241,20 @@ Deno.serve(async (req) => {
       }
     }
 
-    return json({ ok: true, ult_nsu: ultimoNsu, documentos });
+    return responder({
+      ok: true,
+      cstat: cStat,
+      motivo: xMotivo,
+      ult_nsu: ultimoNsu,
+      certificados_na_cadeia: certificadosNaCadeia,
+      milissegundos: Date.now() - inicio,
+      documentos,
+    });
   } catch (erro) {
     console.error(erro);
-    const mensagem = String((erro as Error)?.message ?? erro);
-
-    if (/HTTP\/1\.1|http2/i.test(mensagem)) {
-      return json({
-        erro: "Falha de conexão com a SEFAZ.",
-        detalhe: mensagem.slice(0, 300),
-        certificados_na_cadeia: certificadosNaCadeia,
-      }, 500);
-    }
-    return json({ erro: mensagem }, 500);
+    return responder({
+      erro: String((erro as Error)?.message ?? erro),
+      certificados_na_cadeia: certificadosNaCadeia,
+    }, 500);
   }
 });
