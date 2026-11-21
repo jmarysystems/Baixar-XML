@@ -1,6 +1,6 @@
-import { listar, criar } from '../api.js?v=20261121f';
-import { sb } from '../api.js?v=20261121f';
-import * as ui from '../ui.js?v=20261121f';
+import { listar, criar } from '../api.js?v=20261121g';
+import { sb } from '../api.js?v=20261121g';
+import * as ui from '../ui.js?v=20261121g';
 
 // Prazo da manifestação do destinatário: 15 dias a partir da emissão
 const DIAS_PRAZO = 15;
@@ -156,6 +156,16 @@ export async function render(raiz, ctx) {
             <option value="vencidas">Não manifestadas — prazo vencido</option>
             <option value="no_prazo">Não manifestadas — dentro do prazo</option>
           </select></label>
+      </div>
+
+      <div class="linha-acoes" style="margin-top:12px;flex-wrap:wrap">
+        <button type="button" class="botao-pequeno" id="lote-manifestar">
+          Manifestar todas as vencidas (<span id="qtd-vencidas">0</span>)
+        </button>
+        <button type="button" class="botao-pequeno botao-perigo" id="lote-negar">
+          Negar todas as vencidas (<span id="qtd-vencidas-2">0</span>)
+        </button>
+        <span class="sub" id="lote-status"></span>
       </div>
       ${baixados.length ? `<div class="tabela-rolagem"><table>
         <thead><tr><th>CNPJ</th><th>Emitente</th><th>Chave</th><th>Tipo</th><th>Emissão</th>
@@ -371,6 +381,86 @@ export async function render(raiz, ctx) {
       } catch (erro) { ui.toast(erro.message, 'erro'); }
     });
   }
+
+  // ------------------------------------------------------ ações em lote
+  function vencidasNaoManifestadas() {
+    return baixados.filter((d) => {
+      if (!(d.tipo || '').startsWith('resNFe') || !d.chave) return false;
+      if (d.manifestacao) return false;
+      const p = prazoManifestacao(d);
+      return !!p && p.vencida;
+    });
+  }
+
+  function atualizarContadores() {
+    const total = vencidasNaoManifestadas().length;
+    const a = raiz.querySelector('#qtd-vencidas');
+    const b = raiz.querySelector('#qtd-vencidas-2');
+    if (a) a.textContent = total;
+    if (b) b.textContent = total;
+    const botaoM = raiz.querySelector('#lote-manifestar');
+    const botaoN = raiz.querySelector('#lote-negar');
+    if (botaoM) botaoM.disabled = total === 0;
+    if (botaoN) botaoN.disabled = total === 0;
+  }
+  atualizarContadores();
+
+  async function enviarLote(acao, justificativa) {
+    const docs = vencidasNaoManifestadas();
+    if (!docs.length) { ui.toast('Nenhuma nota vencida pendente.', 'erro'); return; }
+
+    const rotulo = acao === 'negar' ? 'negar' : 'manifestar';
+    if (!window.confirm(
+      `Confirmar ${rotulo} ${docs.length} nota(s) com prazo vencido?\n\n` +
+      'Cada uma gera um evento na SEFAZ. As que forem recusadas ficam marcadas com o motivo.')) {
+      return;
+    }
+
+    const statusLote = raiz.querySelector('#lote-status');
+    const botoes = [raiz.querySelector('#lote-manifestar'), raiz.querySelector('#lote-negar')];
+    botoes.forEach((b) => { if (b) b.disabled = true; });
+
+    let enviados = 0;
+    for (const d of docs) {
+      try {
+        await criar('xml_pedidos', {
+          acao,
+          loja_id: d.loja_id,
+          cnpj: d.cnpj,
+          chave: d.chave,
+          justificativa,
+          ult_nsu: '0',
+          tp_amb: '1',
+          cuf: '23',
+          criado_por: ctx.perfil?.id || null,
+        });
+        enviados += 1;
+        if (statusLote) statusLote.textContent = `enfileirando ${enviados}/${docs.length}…`;
+      } catch (erro) {
+        ui.toast(erro.message, 'erro');
+        break;
+      }
+    }
+
+    if (statusLote) {
+      statusLote.textContent = `${enviados} nota(s) na fila — o sistema envia em lotes de 25 por rodada`;
+    }
+    ui.toast(`${enviados} nota(s) enviadas para a fila.`);
+    setTimeout(() => ctx.recarregar(), 4000);
+  }
+
+  raiz.querySelector('#lote-manifestar')?.addEventListener('click', () => enviarLote('manifestar', null));
+  raiz.querySelector('#lote-negar')?.addEventListener('click', () => {
+    const motivo = window.prompt(
+      'Motivo da negativa (mínimo 15 caracteres), aplicado a todas as notas vencidas:',
+      'Mercadoria nao recebida / operacao nao realizada');
+    if (motivo === null) return;
+    if (motivo.trim().length < 15) {
+      ui.toast('A justificativa precisa de pelo menos 15 caracteres.', 'erro');
+      return;
+    }
+    enviarLote('negar', motivo.trim());
+  });
 
   // --------------------------------------------------- negar recebimento
   for (const b of raiz.querySelectorAll('[data-negar]')) {

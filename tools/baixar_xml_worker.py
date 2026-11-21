@@ -119,9 +119,14 @@ def api(caminho, metodo="GET", corpo=None, bruto=False):
             return exc.code, texto
 
 
-def pegar_pendente(ja_processados=None):
+def pegar_pendente(ja_processados=None, somente_eventos=False, somente_baixar=False):
     ja_processados = ja_processados or set()
-    st, r = api("/rest/v1/xml_pedidos?status=eq.pendente&order=criado_em&limit=5")
+    filtro = ""
+    if somente_eventos:
+        filtro = "&acao=in.(manifestar,negar)"
+    elif somente_baixar:
+        filtro = "&acao=eq.baixar"
+    st, r = api("/rest/v1/xml_pedidos?status=eq.pendente&order=criado_em&limit=20" + filtro)
     if st == 200 and r:
         r = [p for p in r if p["id"] not in ja_processados]
         if not r:
@@ -509,8 +514,9 @@ def main():
         print(f"modo automático ligado (NSU {cfg.get('ult_nsu')})")
         agendar_automatico(cfg)
 
+    # fase 1: downloads (limite da SEFAZ é apertado)
     for _ in range(3):
-        pedido = pegar_pendente(vistos)
+        pedido = pegar_pendente(vistos, somente_baixar=True)
         if pedido:
             vistos.add(pedido["id"])
         if not pedido:
@@ -564,7 +570,44 @@ def main():
             print(f"  erro: {exc}")
         processados += 1
 
-    print(f"pedidos processados: {processados}")
+    print(f"downloads processados: {processados}")
+
+    # fase 2: eventos de manifestação (até 25 por execução)
+    eventos = 0
+    for _ in range(25):
+        pedido = pegar_pendente(vistos, somente_eventos=True)
+        if not pedido:
+            break
+        vistos.add(pedido["id"])
+        acao = pedido.get("acao")
+        print(f"evento {pedido['id']} | {acao} | chave {pedido.get('chave')}")
+        try:
+            pfx, senha_cert = baixar_certificado(pedido["loja_id"])
+            chave_p, cert_p = chaves_pem(pfx, senha_cert)
+            ctx_http = contexto_tls_raw(chave_p, cert_p)
+            ok, msg = manifestar(pedido, ctx_http, chave_p, cert_p)
+
+            if ok is None:
+                atualizar_pedido(pedido["id"], status="pendente", mensagem=msg)
+                continue
+            if not ok:
+                atualizar_pedido(pedido["id"], status="erro", mensagem=msg)
+                print(f"  recusado: {msg}")
+                continue
+
+            api(f"/rest/v1/xml_baixados?chave=eq.{pedido.get('chave')}", "PATCH", {
+                "manifestacao": "nao_realizada" if acao == "negar" else "ciencia",
+                "manifestada_em": agora(),
+                "justificativa": pedido.get("justificativa"),
+            })
+            atualizar_pedido(pedido["id"], status="concluido", mensagem=msg)
+            eventos += 1
+            print(f"  ok: {msg}")
+        except Exception as exc:  # noqa: BLE001
+            atualizar_pedido(pedido["id"], status="erro", mensagem=str(exc))
+            print(f"  erro: {exc}")
+
+    print(f"eventos processados: {eventos}")
     return 0
 
 
