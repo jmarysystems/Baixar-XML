@@ -1,6 +1,6 @@
-import { listar, criar } from '../api.js';
-import { sb } from '../api.js';
-import * as ui from '../ui.js';
+import { listar, criar } from '../api.js?v=20261121a';
+import { sb } from '../api.js?v=20261121a';
+import * as ui from '../ui.js?v=20261121a';
 
 export async function render(raiz, ctx) {
   ctx.setTitulo('Baixar XML');
