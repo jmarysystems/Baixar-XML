@@ -290,8 +290,12 @@ def processar(pedido):
             return total, False
 
         ult = novo.group(1)
+        pedido["_ult_nsu"] = ult
         atualizar_pedido(pedido["id"], ult_nsu=ult, status="processando",
                          documentos=total, mensagem=f"em andamento ({total} documentos)")
+
+        if pedido.get("origem") == "auto":
+            salvar_config(ult_nsu=ult)
 
         if maximo and ult == maximo.group(1):
             print("  chegou ao último NSU disponível")
@@ -307,9 +311,61 @@ def processar(pedido):
     return total, True
 
 
+def ler_config():
+    st, r = api("/rest/v1/xml_config?select=*&id=eq.true")
+    if st == 200 and r:
+        return r[0]
+    return None
+
+
+def salvar_config(**campos):
+    campos["atualizado_em"] = agora()
+    api("/rest/v1/xml_config?id=eq.true", "PATCH", campos)
+
+
+def agendar_automatico(cfg):
+    """Se o modo automático está ligado, garante um pedido na fila."""
+    if not cfg or not cfg.get("automatico") or not cfg.get("loja_id"):
+        return None
+
+    st, ativos = api("/rest/v1/xml_pedidos?status=in.(pendente,processando)"
+                     "&origem=eq.auto&limit=1")
+    if st == 200 and ativos:
+        return None
+
+    corpo = [{
+        "loja_id": cfg["loja_id"],
+        "cnpj": cfg.get("cnpj"),
+        "ult_nsu": cfg.get("ult_nsu") or "0",
+        "tp_amb": cfg.get("tp_amb", "1"),
+        "cuf": cfg.get("cuf", "23"),
+        "origem": "auto",
+        "status": "pendente",
+    }]
+    st, r = api("/rest/v1/xml_pedidos", "POST", corpo)
+    if st < 300:
+        print(f"  pedido automático criado (NSU {corpo[0]['ult_nsu']})")
+        return r[0] if isinstance(r, list) else None
+    return None
+
+
+def atualizar_config_pos_pedido(pedido):
+    cfg = ler_config()
+    if not cfg:
+        return
+    novo_ult = pedido.get("_ult_nsu") or cfg.get("ult_nsu") or "0"
+    salvar_config(ult_nsu=novo_ult)
+
+
 def main():
     processados = 0
     vistos = set()
+
+    cfg = ler_config()
+    if cfg and cfg.get("automatico"):
+        print(f"modo automático ligado (NSU {cfg.get('ult_nsu')})")
+        agendar_automatico(cfg)
+
     for _ in range(3):
         pedido = pegar_pendente(vistos)
         if pedido:
@@ -322,6 +378,8 @@ def main():
             if not continua:
                 atualizar_pedido(pedido["id"], status="concluido", documentos=total,
                                  mensagem=f"{total} documento(s) baixado(s)")
+                if pedido.get("origem") == "auto":
+                    atualizar_config_pos_pedido(pedido)
             print(f"  fim: {total} documentos | continua={continua}")
         except Exception as exc:  # noqa: BLE001
             atualizar_pedido(pedido["id"], status="erro", mensagem=str(exc))

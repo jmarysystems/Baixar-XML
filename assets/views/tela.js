@@ -20,6 +20,12 @@ export async function render(raiz, ctx) {
 
   const pedidos = await listar('xml_pedidos', { ordem: 'criado_em', asc: false, limite: 10 });
 
+  let config = { automatico: false, loja_id: null, cnpj: null, ult_nsu: '0' };
+  try {
+    const { data } = await sb.from('xml_config').select('*').eq('id', true).maybeSingle();
+    if (data) config = data;
+  } catch (_) { /* mantém o padrão desligado */ }
+
   const opcoesLoja = comCertificado.map((l) => `<option value="${ui.esc(l.id)}"
       data-cnpj="${ui.esc(l.cnpj_cpf || '')}"
       data-cuf="${ui.esc((l.codigo_ibge_estado || '').padStart(2, '0'))}">
@@ -75,6 +81,36 @@ export async function render(raiz, ctx) {
       </form>
 
       <div id="status-linha" class="sub" style="margin-top:8px"></div>
+    </div>
+
+    <div class="cartao">
+      <div class="cartao-topo"><h2>Download automático por NSU</h2></div>
+      <p class="sub">Ligado, o sistema busca os documentos novos sozinho, respeitando
+        o intervalo que a SEFAZ permite. Desligado por padrão.</p>
+
+      <label class="campo" style="flex-direction:row;align-items:center;gap:10px">
+        <input type="checkbox" id="auto" ${config.automatico ? 'checked' : ''}
+               style="width:18px;height:18px">
+        <span style="font-weight:600">Baixar automaticamente</span>
+      </label>
+
+      <div class="grade grade-2" style="margin-top:12px">
+        <label class="campo"><span>Estabelecimento</span>
+          <select id="auto-loja">
+            <option value="">—</option>
+            ${comCertificado.map((l) => `<option value="${ui.esc(l.id)}"
+               data-cnpj="${ui.esc(l.cnpj_cpf || '')}"
+               data-cuf="${ui.esc((l.codigo_ibge_estado || '').padStart(2, '0'))}"
+               ${config.loja_id === l.id ? 'selected' : ''}>${ui.esc(l.nome)}</option>`).join('')}
+          </select></label>
+        <label class="campo"><span>CNPJ</span>
+          <input id="auto-cnpj" value="${ui.esc(config.cnpj || '')}" placeholder="somente números"></label>
+      </div>
+
+      <div class="linha-acoes" style="margin-top:12px">
+        <button type="button" class="botao-pequeno" id="salvar-auto">Salvar configuração</button>
+        <span class="sub" id="auto-status"></span>
+      </div>
     </div>
 
     <div id="andamento"></div>
@@ -249,6 +285,60 @@ export async function render(raiz, ctx) {
       } catch (erro) { ui.toast(erro.message, 'erro'); }
     });
   }
+
+  // ------------------------------------------------- download automático
+  const caixaAuto = raiz.querySelector('#auto');
+  const autoLoja = raiz.querySelector('#auto-loja');
+  const autoCnpj = raiz.querySelector('#auto-cnpj');
+  const autoStatus = raiz.querySelector('#auto-status');
+  let ultimoNsu = config.ult_nsu || '0';
+
+  function mostrarStatus() {
+    if (!autoStatus) return;
+    autoStatus.textContent = caixaAuto.checked
+      ? `ligado · último NSU ${ultimoNsu}`
+      : 'desligado';
+  }
+  mostrarStatus();
+
+  autoLoja.addEventListener('change', () => {
+    const cnpj = (autoLoja.selectedOptions[0]?.dataset.cnpj || '').replace(/\D/g, '');
+    if (cnpj) autoCnpj.value = cnpj;
+  });
+
+  raiz.querySelector('#salvar-auto').addEventListener('click', async () => {
+    const cnpj = autoCnpj.value.replace(/\D/g, '');
+    const lojaId = autoLoja.value || null;
+
+    if (caixaAuto.checked && (!lojaId || cnpj.length !== 14)) {
+      ui.toast('Escolha o estabelecimento e informe o CNPJ.', 'erro');
+      return;
+    }
+
+    const botao = raiz.querySelector('#salvar-auto');
+    botao.disabled = true;
+    try {
+      const cuf = (autoLoja.selectedOptions[0]?.dataset.cuf || '23').slice(0, 2);
+      const { error } = await sb.from('xml_config').update({
+        automatico: caixaAuto.checked,
+        loja_id: lojaId,
+        cnpj: cnpj || null,
+        cuf,
+        atualizado_em: new Date().toISOString(),
+        atualizado_por: ctx.perfil?.id || null,
+      }).eq('id', true);
+      if (error) throw error;
+
+      mostrarStatus();
+      ui.toast(caixaAuto.checked
+        ? 'Download automático ligado.'
+        : 'Download automático desligado.');
+    } catch (erro) {
+      ui.toast(erro.message, 'erro');
+    } finally {
+      botao.disabled = false;
+    }
+  });
 
   const ativo = pedidos.find((p) => p.status === 'pendente' || p.status === 'processando');
   if (ativo) {
