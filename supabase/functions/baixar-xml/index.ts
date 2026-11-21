@@ -29,7 +29,7 @@ const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const ENDPOINT =
   "https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx";
 
-function envelope(cnpj: string, ultNsu: string, tpAmb: string, cUF: string) {
+function envelope(cnpj: string, ultNsu: string, tpAmb: string, cUF: string, chave?: string | null) {
   return `<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
@@ -39,7 +39,8 @@ function envelope(cnpj: string, ultNsu: string, tpAmb: string, cUF: string) {
           <tpAmb>${tpAmb}</tpAmb>
           <cUFAutor>${cUF}</cUFAutor>
           <CNPJ>${cnpj}</CNPJ>
-          <distNSU><ultNSU>${ultNsu.padStart(15, "0")}</ultNSU></distNSU>
+          ${chave ? `<consChNFe><chNFe>${chave}</chNFe></consChNFe>`
+                 : `<distNSU><ultNSU>${ultNsu.padStart(15, "0")}</ultNSU></distNSU>`}
         </distDFeInt>
       </nfeDadosMsg>
     </nfeDistDFeInteresse>
@@ -74,6 +75,9 @@ Deno.serve(async (req) => {
     const cnpj = String(corpo?.cnpj ?? "").replace(/\D/g, "");
     const ultNsu = String(corpo?.ult_nsu ?? "0").replace(/\D/g, "") || "0";
     const tpAmb = String(corpo?.tp_amb ?? "1");
+    const cuf = String(corpo?.cuf ?? "23").replace(/\D/g, "").slice(0, 2) || "23";
+
+    const chave = String(corpo?.chave ?? "").replace(/\D/g, "") || null;
 
     if (!lojaId || cnpj.length !== 14) return json({ erro: "Informe loja_id e CNPJ." }, 400);
 
@@ -138,19 +142,18 @@ Deno.serve(async (req) => {
       }, 501);
     }
 
-    const cliente = criarCliente.call(Deno, {
-      cert: certPem,
-      key: chavePem,
-    }) as { fetch: typeof fetch };
+    const cliente = criarCliente.call(Deno, { cert: certPem, key: chavePem });
 
-    const soap = envelope(cnpj, ultNsu, tpAmb, "91");
-    const resposta = await cliente.fetch(ENDPOINT, {
+    const soap = envelope(cnpj, ultNsu, tpAmb, cuf, chave);
+    const resposta = await fetch(ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/soap+xml; charset=utf-8",
         "SOAPAction": "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse",
       },
       body: soap,
+      // @ts-ignore: client TLS é extensão do Deno, fora do tipo padrão
+      client: cliente,
     });
 
     const texto = await resposta.text();
