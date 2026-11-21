@@ -183,7 +183,8 @@ def extrair(resposta):
             xml = gzip.decompress(base64.b64decode(conteudo)).decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
             continue
-        chave = re.search(r'Id="NFe(\d{44})"', xml)
+        chave = (re.search(r'Id="NFe(\d{44})"', xml)
+                 or re.search(r"<chNFe>(\d{44})</chNFe>", xml))
         docs.append({
             "nsu": nsu.group(1) if nsu else None,
             "schema": schema.group(1) if schema else None,
@@ -217,7 +218,7 @@ def gravar(loja_id, cnpj, docs, ja_existem, criado_por):
         return 0
     corpo = [{"loja_id": loja_id, "cnpj": cnpj, "criado_por": criado_por, **d}
              for d in novos]
-    st, _ = api("/rest/v1/xml_baixados?on_conflict=cnpj,chave", "POST", corpo)
+    st, _ = api("/rest/v1/xml_baixados", "POST", corpo)
     if st >= 300:
         print(f"    falha ao gravar: {st}")
         return 0
