@@ -1,6 +1,6 @@
 // Tela genérica de cadastro: lista, filtro, formulário e exclusão.
-import { listar, criar, atualizar, excluir } from './api.js?v=20261121a';
-import * as ui from './ui.js?v=20261121a';
+import { listar, criar, atualizar, excluir } from './api.js?v=20261121b';
+import * as ui from './ui.js?v=20261121b';
 
 const rotuloDe = (listas, de, id) => {
   if (!de || !id) return '—';

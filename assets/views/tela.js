@@ -1,6 +1,6 @@
-import { listar, criar } from '../api.js?v=20261121a';
-import { sb } from '../api.js?v=20261121a';
-import * as ui from '../ui.js?v=20261121a';
+import { listar, criar } from '../api.js?v=20261121b';
+import { sb } from '../api.js?v=20261121b';
+import * as ui from '../ui.js?v=20261121b';
 
 export async function render(raiz, ctx) {
   ctx.setTitulo('Baixar XML');
@@ -121,7 +121,8 @@ export async function render(raiz, ctx) {
         <input type="search" id="busca-docs"
                placeholder="NSU, chave da NF-e, CNPJ ou tipo"></label>
       ${baixados.length ? `<div class="tabela-rolagem"><table>
-        <thead><tr><th>CNPJ</th><th>Chave</th><th>Tipo</th><th>Manifestação</th><th>NSU</th>
+        <thead><tr><th>CNPJ</th><th>Chave</th><th>Tipo</th><th>Emissão</th>
+          <th>Manifestação</th><th>NSU</th>
           <th>Estabelecimento</th><th>Baixado em</th><th></th></tr></thead>
         <tbody>
           ${baixados.map((d) => `<tr data-busca="${ui.esc(
@@ -130,6 +131,7 @@ export async function render(raiz, ctx) {
             <td class="mono">${ui.esc(d.cnpj)}</td>
             <td class="mono">${ui.esc(d.chave || '—')}</td>
             <td>${ui.esc(d.tipo || d.schema || '—')}</td>
+            <td>${d.emitida_em ? ui.dataBR(d.emitida_em) : '—'}</td>
             <td>${(d.tipo || '').startsWith('resNFe') && d.chave
               ? `<button type="button" class="botao-pequeno"
                         data-manifestar="${ui.esc(d.chave)}"
