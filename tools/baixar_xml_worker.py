@@ -1,7 +1,10 @@
 """Worker do GitHub Actions: processa a fila xml_pedidos baixando da SEFAZ.
 
-Roda no GitHub Actions com a chave service_role em secret. Nunca precisa do
-certificado em disco: baixa do bucket privado e lê a senha do Vault.
+Regras importantes:
+  • retoma de onde parou (guarda o último NSU no próprio pedido);
+  • não duplica documentos (confere NSU já gravado);
+  • ao receber 656 devolve o pedido para a fila em vez de falhar;
+  • espera entre lotes para não estourar o limite da SEFAZ.
 """
 
 from __future__ import annotations
@@ -30,6 +33,9 @@ SUPA = os.environ.get("SUPABASE_URL", "https://cowbpaaaguylhlvnlaac.supabase.co"
 SERVICE = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 ENDPOINT = "https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx"
 
+LOTES_POR_EXECUCAO = 3      # quantos lotes de 50 por rodada do workflow
+ESPERA_ENTRE_LOTES = 45     # segundos entre lotes
+
 CABECALHO = """<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                  xmlns:xsd="http://www.w3.org/2001/XMLSchema"
@@ -51,6 +57,10 @@ MOLDE_NSU = """        <distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" ve
         </distDFeInt>"""
 
 
+def agora():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def api(caminho, metodo="GET", corpo=None, bruto=False):
     dados = json.dumps(corpo).encode() if corpo is not None else None
     req = urllib.request.Request(
@@ -59,7 +69,7 @@ def api(caminho, metodo="GET", corpo=None, bruto=False):
                  "Content-Type": "application/json",
                  "Prefer": "return=representation"})
     try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             conteudo = resp.read()
             if bruto:
                 return resp.status, conteudo
@@ -84,17 +94,16 @@ def pegar_pendente():
     return None
 
 
-def agora():
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def atualizar_pedido(pedido_id, **campos):
+    campos.setdefault("fim_em", agora())
+    api(f"/rest/v1/xml_pedidos?id=eq.{pedido_id}", "PATCH", campos)
 
 
-def marcar(pedido_id, status, mensagem=None, documentos=None):
-    corpo = {"status": status, "fim_em": agora()}
-    if mensagem is not None:
-        corpo["mensagem"] = mensagem[:500]
-    if documentos is not None:
-        corpo["documentos"] = documentos
-    api(f"/rest/v1/xml_pedidos?id=eq.{pedido_id}", "PATCH", corpo)
+def usuario_para(pedido_id):
+    st, r = api(f"/rest/v1/xml_pedidos?select=criado_por&id=eq.{pedido_id}")
+    if st == 200 and r:
+        return r[0].get("criado_por")
+    return None
 
 
 def baixar_certificado(loja_id):
@@ -103,7 +112,7 @@ def baixar_certificado(loja_id):
         raise RuntimeError("estabelecimento não encontrado")
     caminho = loja[0].get("certificado_caminho")
     if not caminho:
-        raise RuntimeError("estabelecimento sem certificado")
+        raise RuntimeError("estabelecimento sem certificado digital")
 
     st, conteudo = api(f"/storage/v1/object/certificados/{caminho}", bruto=True)
     if st != 200:
@@ -171,67 +180,112 @@ def extrair(resposta):
     return docs
 
 
-def gravar(loja_id, cnpj, docs):
-    if not docs:
+def nsus_gravados(cnpj):
+    st, r = api(f"/rest/v1/xml_baixados?select=nsu&cnpj=eq.{cnpj}&chave=not.is.null"
+                if False else f"/rest/v1/xml_baixados?select=nsu&cnpj=eq.{cnpj}")
+    if st == 200 and r:
+        return {linha["nsu"] for linha in r if linha.get("nsu")}
+    return set()
+
+
+def maior_nsu(cnpj):
+    st, r = api(f"/rest/v1/xml_baixados?select=nsu&cnpj=eq.{cnpj}"
+                "&order=nsu.desc&limit=1")
+    if st == 200 and r and r[0].get("nsu"):
+        return r[0]["nsu"]
+    return None
+
+
+def gravar(loja_id, cnpj, docs, ja_existem, criado_por):
+    novos = [d for d in docs if d.get("nsu") not in ja_existem]
+    if not novos:
         return 0
-    corpo = [{"loja_id": loja_id, "cnpj": cnpj, **d} for d in docs]
+    corpo = [{"loja_id": loja_id, "cnpj": cnpj, "criado_por": criado_por, **d}
+             for d in novos]
     st, _ = api("/rest/v1/xml_baixados?on_conflict=cnpj,chave", "POST", corpo)
     if st >= 300:
+        print(f"    falha ao gravar: {st}")
         return 0
-    return len(corpo)
+    ja_existem.update(d["nsu"] for d in novos if d.get("nsu"))
+    return len(novos)
 
 
 def processar(pedido):
     pfx, senha = baixar_certificado(pedido["loja_id"])
     ctx = contexto_tls(pfx, senha)
 
-    ult = (pedido.get("ult_nsu") or "0").zfill(15)
-    total = 0
-    tentativas_656 = 0
+    cnpj = pedido["cnpj"]
+    ja_existem = nsus_gravados(cnpj)
+    criado_por = usuario_para(pedido["id"])
 
-    for rodada in range(1, 40):
-        resposta = consultar(ctx, pedido["cnpj"], ult, pedido.get("tp_amb", "1"),
-                             pedido.get("cuf", "23"))
+    ult = (pedido.get("ult_nsu") or "0").zfill(15)
+    if ult == "0" * 15:
+        salvo = maior_nsu(cnpj)
+        if salvo:
+            ult = salvo.zfill(15)
+            print(f"  retomando do NSU {ult}")
+
+    total = 0
+    for lote in range(1, LOTES_POR_EXECUCAO + 1):
+        resposta = consultar(ctx, cnpj, ult, pedido.get("tp_amb", "1"), pedido.get("cuf", "23"))
+
         cstat = re.search(r"<cStat>(\d+)</cStat>", resposta)
         cstat = cstat.group(1) if cstat else "?"
+        motivo = re.search(r"<xMotivo>([^<]+)</xMotivo>", resposta)
 
         if cstat == "656":
-            tentativas_656 += 1
-            if tentativas_656 > 3:
-                raise RuntimeError("SEFAZ bloqueou as consultas (cStat 656). Tente mais tarde.")
-            time.sleep(90 * tentativas_656)
-            continue
+            print("  SEFAZ bloqueou (656) — devolvendo para a fila")
+            atualizar_pedido(pedido["id"], status="pendente", ult_nsu=ult,
+                             mensagem="Aguardando o limite da SEFAZ liberar")
+            return total, True
 
         docs = extrair(resposta)
         if docs:
-            total += gravar(pedido["loja_id"], pedido["cnpj"], docs)
-            print(f"  rodada {rodada}: {len(docs)} documentos (total {total})")
+            gravados = gravar(pedido["loja_id"], cnpj, docs, ja_existem, criado_por)
+            total += gravados
+            print(f"  lote {lote}: {len(docs)} recebidos, {gravados} novos (total {total})")
 
         novo = re.search(r"<ultNSU>(\d+)</ultNSU>", resposta)
         maximo = re.search(r"<maxNSU>(\d+)</maxNSU>", resposta)
-        if not docs or not novo:
-            break
-        if maximo and novo.group(1) == maximo.group(1):
-            break
-        ult = novo.group(1)
-        time.sleep(20)
 
-    return total
+        if not docs or not novo:
+            print(f"  sem documentos novos (cStat {cstat}"
+                  f"{' - ' + motivo.group(1) if motivo else ''})")
+            return total, False
+
+        ult = novo.group(1)
+        atualizar_pedido(pedido["id"], ult_nsu=ult, status="processando",
+                         documentos=total, mensagem=f"em andamento ({total} documentos)")
+
+        if maximo and ult == maximo.group(1):
+            print("  chegou ao último NSU disponível")
+            return total, False
+
+        if lote < LOTES_POR_EXECUCAO:
+            print(f"  aguardando {ESPERA_ENTRE_LOTES}s…")
+            time.sleep(ESPERA_ENTRE_LOTES)
+
+    print("  fim do lote desta execução — continua na próxima")
+    atualizar_pedido(pedido["id"], status="pendente", ult_nsu=ult,
+                     documentos=total, mensagem=f"continua na próxima execução ({total} até agora)")
+    return total, True
 
 
 def main():
     processados = 0
-    for _ in range(5):
+    for _ in range(2):
         pedido = pegar_pendente()
         if not pedido:
             break
         print(f"pedido {pedido['id']} | CNPJ {pedido['cnpj']}")
         try:
-            total = processar(pedido)
-            marcar(pedido["id"], "concluido", f"{total} documento(s) baixado(s)", total)
-            print(f"  concluído com {total} documentos")
+            total, continua = processar(pedido)
+            if not continua:
+                atualizar_pedido(pedido["id"], status="concluido", documentos=total,
+                                 mensagem=f"{total} documento(s) baixado(s)")
+            print(f"  fim: {total} documentos | continua={continua}")
         except Exception as exc:  # noqa: BLE001
-            marcar(pedido["id"], "erro", str(exc))
+            atualizar_pedido(pedido["id"], status="erro", mensagem=str(exc))
             print(f"  erro: {exc}")
         processados += 1
 
