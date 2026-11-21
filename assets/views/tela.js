@@ -116,6 +116,11 @@ export async function render(raiz, ctx) {
         status.textContent = '';
         const botao = raiz.querySelector('#baixar');
         if (botao) { botao.disabled = false; botao.textContent = 'Baixar XML'; }
+      } else if (data.status === 'pendente' && data.mensagem) {
+        andamento.innerHTML = `<div class="cartao">
+          <strong>⏳ Na fila</strong> — ${ui.esc(data.mensagem)}.
+          O sistema tenta de novo automaticamente.
+        </div>`;
       } else {
         andamento.innerHTML = `<div class="cartao">
           <strong>⏳ Processando…</strong> — buscando os documentos na SEFAZ.
