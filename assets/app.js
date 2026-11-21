@@ -1,8 +1,8 @@
 // Shell: login, layout e rota única.
-import { sb, sair, sessao, meuPerfil, entrar, minhasPermissoes } from './api.js?v=20261121c';
-import { SISTEMA } from './config.js?v=20261121c';
-import * as ui from './ui.js?v=20261121c';
-import * as tela from './views/tela.js?v=20261121c';
+import { sb, sair, sessao, meuPerfil, entrar, minhasPermissoes } from './api.js?v=20261121d';
+import { SISTEMA } from './config.js?v=20261121d';
+import * as ui from './ui.js?v=20261121d';
+import * as tela from './views/tela.js?v=20261121d';
 
 const app = document.getElementById('app');
 let perfil = null;

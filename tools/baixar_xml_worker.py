@@ -242,10 +242,17 @@ def extrair(resposta):
             continue
         chave = (re.search(r'Id="NFe(\d{44})"', xml)
                  or re.search(r"<chNFe>(\d{44})</chNFe>", xml))
+        emitida = re.search(r"<dhEmi>([^<]+)</dhEmi>", xml)
+        emitente = (re.search(r"<emit>(?:.|\n)*?<CNPJ>(\d{14})</CNPJ>", xml)
+                    or re.search(r"<CNPJ>(\d{14})</CNPJ>", xml))
+        emitente_nome = re.search(r"<emit>(?:.|\n)*?<xNome>([^<]+)</xNome>", xml)
         docs.append({
             "nsu": nsu.group(1) if nsu else None,
             "schema": schema.group(1) if schema else None,
             "chave": chave.group(1) if chave else None,
+            "emitida_em": emitida.group(1) if emitida else None,
+            "emitente_cnpj": emitente.group(1) if emitente else None,
+            "emitente_nome": emitente_nome.group(1) if emitente_nome else None,
             "tipo": "NF-e" if (schema and schema.group(1).startswith("procNFe"))
                     else (schema.group(1) if schema else "documento"),
             "xml": xml,

@@ -1,6 +1,6 @@
-import { listar, criar } from '../api.js?v=20261121c';
-import { sb } from '../api.js?v=20261121c';
-import * as ui from '../ui.js?v=20261121c';
+import { listar, criar } from '../api.js?v=20261121d';
+import { sb } from '../api.js?v=20261121d';
+import * as ui from '../ui.js?v=20261121d';
 
 // Prazo da manifestação do destinatário: 15 dias a partir da emissão
 const DIAS_PRAZO = 15;
@@ -146,14 +146,19 @@ export async function render(raiz, ctx) {
         <input type="search" id="busca-docs"
                placeholder="NSU, chave da NF-e, CNPJ ou tipo"></label>
       ${baixados.length ? `<div class="tabela-rolagem"><table>
-        <thead><tr><th>CNPJ</th><th>Chave</th><th>Tipo</th><th>Emissão</th>
+        <thead><tr><th>CNPJ</th><th>Emitente</th><th>Chave</th><th>Tipo</th><th>Emissão</th>
           <th>Prazo de manifestação</th><th>Manifestação</th><th>NSU</th>
           <th>Estabelecimento</th><th>Baixado em</th><th></th></tr></thead>
         <tbody>
           ${baixados.map((d) => `<tr data-busca="${ui.esc(
-            `${d.nsu || ''} ${d.chave || ''} ${d.cnpj || ''} ${d.tipo || ''} ${d.schema || ''}`
+            `${d.nsu || ''} ${d.chave || ''} ${d.cnpj || ''} ${d.tipo || ''} ` +
+            `${d.emitente_cnpj || ''} ${d.emitente_nome || ''} ${d.schema || ''}`
               .toLowerCase())}">
             <td class="mono">${ui.esc(d.cnpj)}</td>
+            <td class="mono">${ui.esc(d.emitente_cnpj || '—')}${
+              d.emitente_nome
+                ? `<br><small class="sub" style="font-size:11px">${ui.esc(d.emitente_nome)}</small>`
+                : ''}</td>
             <td class="mono">${ui.esc(d.chave || '—')}</td>
             <td>${ui.esc(d.tipo || d.schema || '—')}</td>
             <td>${d.emitida_em ? ui.dataBR(d.emitida_em) : '—'}</td>
