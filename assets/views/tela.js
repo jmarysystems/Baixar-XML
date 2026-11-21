@@ -22,11 +22,12 @@ export async function render(raiz, ctx) {
       <div class="cartao-topo"><h2>Baixar XML da SEFAZ</h2></div>
       <p class="sub">Escolha o estabelecimento (com certificado digital), confirme o CNPJ
         e baixe os documentos fiscais eletrônicos.</p>
-      <p class="sub" style="background:#fdf3d3;border-radius:8px;padding:10px 12px">
-        A SEFAZ exige o certificado na própria conexão (TLS mútuo). Se o botão avisar
-        que o serviço não está disponível, rode o download pelo script no computador
-        que tem o certificado — os XMLs aparecem nesta lista.
-      </p>
+      <div class="sub" style="background:#eef3fb;border:1px solid #cfe0f6;border-radius:8px;padding:12px 14px;margin:12px 0">
+        <strong>Como baixar:</strong> a SEFAZ exige o certificado na própria conexão
+        (TLS mútuo), e o servidor do site não consegue fechar essa conexão.
+        Dê <strong>dois cliques em "Baixar XML.bat"</strong> no computador que tem o
+        certificado — ele baixa e grava aqui automaticamente.
+      </div>
 
       <form id="form" class="grade grade-2">
         <label class="campo"><span>Estabelecimento</span>
@@ -49,7 +50,7 @@ export async function render(raiz, ctx) {
           </select></label>
 
         ${podeBaixar ? `<div class="linha-acoes campo-largo">
-          <button type="submit" class="botao-primario" id="baixar">Baixar XML</button>
+          <button type="submit" class="botao-pequeno" id="baixar">Tentar pelo servidor</button>
           <span class="sub" id="status"></span>
         </div>` : ''}
       </form>
@@ -107,23 +108,27 @@ export async function render(raiz, ctx) {
 
     try {
       let data = null;
-      try {
-        const resposta = await sb.functions.invoke('baixar-xml', {
-          body: { loja_id: lojaId, cnpj, ult_nsu: ultNsu, tp_amb: tpAmb },
-        });
-        if (resposta.error) throw resposta.error;
-        data = resposta.data;
-      } catch (falha) {
-        const texto = String(falha?.message || falha || '');
-        if (/Failed to send a request|not found|404|FunctionsFetchError/i.test(texto)) {
+      const resposta = await sb.functions.invoke('baixar-xml', {
+        body: { loja_id: lojaId, cnpj, ult_nsu: ultNsu, tp_amb: tpAmb },
+      });
+
+      if (resposta.error) {
+        let detalhe = resposta.error.message || 'Erro no serviço.';
+        try {
+          const corpo = await resposta.error.context.json();
+          if (corpo?.erro) detalhe = corpo.erro;
+          if (corpo?.detalhe) detalhe += ` (${corpo.detalhe})`;
+        } catch (_) { /* sem corpo JSON */ }
+
+        if (/Failed to send a request|not found|non-2xx|FunctionsFetchError/i.test(detalhe)) {
           throw new Error(
-            'O serviço de download não está publicado no servidor. ' +
-            'Rode o script baixar_xml_sefaz.py no computador que tem o certificado — ' +
-            'os XMLs aparecem nesta lista.');
+            'O download pelo servidor não está disponível. Use o "Baixar XML.bat" '
+            + 'no computador que tem o certificado.');
         }
-        throw falha;
+        throw new Error(detalhe);
       }
 
+      data = resposta.data;
       if (data?.erro) throw new Error(data.erro);
 
       const documentos = data?.documentos || [];
@@ -151,7 +156,7 @@ export async function render(raiz, ctx) {
       if (status) status.textContent = erro.message;
     } finally {
       botao.disabled = false;
-      botao.textContent = 'Baixar XML';
+      botao.textContent = 'Tentar pelo servidor';
     }
   });
 
