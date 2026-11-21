@@ -22,6 +22,11 @@ export async function render(raiz, ctx) {
       <div class="cartao-topo"><h2>Baixar XML da SEFAZ</h2></div>
       <p class="sub">Escolha o estabelecimento (com certificado digital), confirme o CNPJ
         e baixe os documentos fiscais eletrônicos.</p>
+      <p class="sub" style="background:#fdf3d3;border-radius:8px;padding:10px 12px">
+        A SEFAZ exige o certificado na própria conexão (TLS mútuo). Se o botão avisar
+        que o serviço não está disponível, rode o download pelo script no computador
+        que tem o certificado — os XMLs aparecem nesta lista.
+      </p>
 
       <form id="form" class="grade grade-2">
         <label class="campo"><span>Estabelecimento</span>
@@ -101,10 +106,23 @@ export async function render(raiz, ctx) {
     if (status) status.textContent = '';
 
     try {
-      const { data, error } = await sb.functions.invoke('baixar-xml', {
-        body: { loja_id: lojaId, cnpj, ult_nsu: ultNsu, tp_amb: tpAmb },
-      });
-      if (error) throw new Error(error.message || 'Falha ao chamar o serviço.');
+      let data = null;
+      try {
+        const resposta = await sb.functions.invoke('baixar-xml', {
+          body: { loja_id: lojaId, cnpj, ult_nsu: ultNsu, tp_amb: tpAmb },
+        });
+        if (resposta.error) throw resposta.error;
+        data = resposta.data;
+      } catch (falha) {
+        const texto = String(falha?.message || falha || '');
+        if (/Failed to send a request|not found|404|FunctionsFetchError/i.test(texto)) {
+          throw new Error(
+            'O serviço de download não está publicado no servidor. ' +
+            'Rode o script baixar_xml_sefaz.py no computador que tem o certificado — ' +
+            'os XMLs aparecem nesta lista.');
+        }
+        throw falha;
+      }
 
       if (data?.erro) throw new Error(data.erro);
 
