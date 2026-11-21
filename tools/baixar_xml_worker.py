@@ -421,17 +421,28 @@ def assinar_evento(evento_xml: str, chave_pem: str, cert_pem: str) -> str:
     from lxml import etree
     from signxml import XMLSigner, methods
 
+    class AssinadorNFe(XMLSigner):
+        # a NF-e ainda usa SHA-1 no XMLDSig; o signxml bloqueia por padrão
+        def check_deprecated_methods(self):
+            return None
+
     raiz = etree.fromstring(evento_xml.encode("utf-8"))
     inf = raiz.find("{http://www.portalfiscal.inf.br/nfe}infEvento")
     id_evento = inf.get("Id")
 
-    assinador = XMLSigner(
+    assinador = AssinadorNFe(
         method=methods.enveloped,
         signature_algorithm="rsa-sha1",
         digest_algorithm="sha1",
         c14n_algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
     )
-    assinado = assinador.sign(inf, key=chave_pem, cert=cert_pem, reference_uri=id_evento)
+    assinado = assinador.sign(inf, key=chave_pem, cert=cert_pem,
+                              reference_uri=f"#{id_evento}")
+
+    # o signxml devolve o elemento já com a assinatura: recoloca na árvore
+    if assinado is not None and assinado is not inf:
+        raiz.replace(inf, assinado)
+
     return etree.tostring(raiz, encoding="unicode")
 
 
