@@ -1,4 +1,4 @@
-import { listar, rpc } from '../api.js';
+import { listar, criar } from '../api.js';
 import { sb } from '../api.js';
 import * as ui from '../ui.js';
 
@@ -15,33 +15,32 @@ export async function render(raiz, ctx) {
     select: '*, arm_lojas(nome)',
     ordem: 'baixado_em',
     asc: false,
+    limite: 200,
   });
+
+  const pedidos = await listar('xml_pedidos', { ordem: 'criado_em', asc: false, limite: 10 });
 
   raiz.innerHTML = `
     <div class="cartao">
       <div class="cartao-topo"><h2>Baixar XML da SEFAZ</h2></div>
       <p class="sub">Escolha o estabelecimento (com certificado digital), confirme o CNPJ
-        e baixe os documentos fiscais eletrônicos.</p>
-      <div class="sub" style="background:#eef3fb;border:1px solid #cfe0f6;border-radius:8px;padding:12px 14px;margin:12px 0">
-        <strong>Como baixar:</strong> a SEFAZ exige o certificado na própria conexão
-        (TLS mútuo), e o servidor do site não consegue fechar essa conexão.
-        Dê <strong>dois cliques em "Baixar XML.bat"</strong> no computador que tem o
-        certificado — ele baixa e grava aqui automaticamente.
-      </div>
+        e o sistema busca os documentos direto na SEFAZ.</p>
 
       <form id="form" class="grade grade-2">
         <label class="campo"><span>Estabelecimento</span>
           <select name="loja_id" id="loja" required>
             <option value="">—</option>
             ${comCertificado.map((l) => `<option value="${ui.esc(l.id)}"
-               data-cnpj="${ui.esc(l.cnpj_cpf || '')}">${ui.esc(l.nome)}</option>`).join('')}
+               data-cnpj="${ui.esc(l.cnpj_cpf || '')}"
+               data-cuf="${ui.esc((l.codigo_ibge_estado || '').padStart(2, '0'))}"
+               data-uf="${ui.esc(l.sigla_estado || '')}">${ui.esc(l.nome)}</option>`).join('')}
           </select></label>
 
         <label class="campo"><span>CNPJ</span>
           <input name="cnpj" id="cnpj" placeholder="somente números" required></label>
 
         <label class="campo"><span>Último NSU</span>
-          <input name="ult_nsu" id="ult_nsu" placeholder="0" value="0"></label>
+          <input name="ult_nsu" id="ult_nsu" value="0"></label>
 
         <label class="campo"><span>Ambiente</span>
           <select name="tp_amb">
@@ -50,11 +49,13 @@ export async function render(raiz, ctx) {
           </select></label>
 
         ${podeBaixar ? `<div class="linha-acoes campo-largo">
-          <button type="submit" class="botao-pequeno" id="baixar">Tentar pelo servidor</button>
+          <button type="submit" class="botao-primario" id="baixar">Baixar XML</button>
           <span class="sub" id="status"></span>
         </div>` : ''}
       </form>
     </div>
+
+    <div id="andamento"></div>
 
     <div class="cartao">
       <div class="cartao-topo"><h2>${baixados.length} documento(s) baixado(s)</h2></div>
@@ -83,12 +84,45 @@ export async function render(raiz, ctx) {
   const campoCnpj = raiz.querySelector('#cnpj');
   const campoNsu = raiz.querySelector('#ult_nsu');
   const status = raiz.querySelector('#status');
+  const andamento = raiz.querySelector('#andamento');
 
   selLoja.addEventListener('change', () => {
     const opcao = selLoja.selectedOptions[0];
     const cnpj = (opcao?.dataset.cnpj || '').replace(/\D/g, '');
     if (cnpj) campoCnpj.value = cnpj;
   });
+
+  let intervalo = null;
+
+  function acompanhar(pedidoId) {
+    if (intervalo) clearInterval(intervalo);
+
+    intervalo = setInterval(async () => {
+      const { data } = await sb.from('xml_pedidos').select('*').eq('id', pedidoId).maybeSingle();
+      if (!data) return;
+
+      if (data.status === 'concluido') {
+        clearInterval(intervalo);
+        andamento.innerHTML = `<div class="cartao" style="border-color:#bfe3cd">
+          <strong>✅ Concluído</strong> — ${ui.esc(data.mensagem || 'documentos baixados')}
+        </div>`;
+        status.textContent = '';
+        setTimeout(() => ctx.recarregar(), 1200);
+      } else if (data.status === 'erro') {
+        clearInterval(intervalo);
+        andamento.innerHTML = `<div class="cartao" style="border-color:#f3c6c2">
+          <strong>⚠️ Não foi possível baixar</strong> — ${ui.esc(data.mensagem || 'erro')}
+        </div>`;
+        status.textContent = '';
+        const botao = raiz.querySelector('#baixar');
+        if (botao) { botao.disabled = false; botao.textContent = 'Baixar XML'; }
+      } else {
+        andamento.innerHTML = `<div class="cartao">
+          <strong>⏳ Processando…</strong> — buscando os documentos na SEFAZ.
+        </div>`;
+      }
+    }, 5000);
+  }
 
   raiz.querySelector('#form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -97,66 +131,36 @@ export async function render(raiz, ctx) {
     const cnpj = String(dados.get('cnpj') || '').replace(/\D/g, '');
     const ultNsu = String(dados.get('ult_nsu') || '0').replace(/\D/g, '') || '0';
     const tpAmb = String(dados.get('tp_amb') || '1');
+    const opcao = selLoja.selectedOptions[0];
 
     if (!lojaId) { ui.toast('Escolha o estabelecimento.', 'erro'); return; }
     if (cnpj.length !== 14) { ui.toast('Informe um CNPJ com 14 dígitos.', 'erro'); return; }
 
     const botao = raiz.querySelector('#baixar');
     botao.disabled = true;
-    botao.textContent = 'Consultando a SEFAZ…';
-    if (status) status.textContent = '';
+    botao.textContent = 'Enviando…';
 
     try {
-      let data = null;
-      const resposta = await sb.functions.invoke('baixar-xml', {
-        body: { loja_id: lojaId, cnpj, ult_nsu: ultNsu, tp_amb: tpAmb },
+      const pedido = await criar('xml_pedidos', {
+        loja_id: lojaId,
+        cnpj,
+        ult_nsu: ultNsu,
+        tp_amb: tpAmb,
+        cuf: (opcao?.dataset.cuf || '23').slice(0, 2),
+        criado_por: ctx.perfil?.id || null,
       });
 
-      if (resposta.error) {
-        let detalhe = resposta.error.message || 'Erro no serviço.';
-        try {
-          const corpo = await resposta.error.context.json();
-          if (corpo?.erro) detalhe = corpo.erro;
-          if (corpo?.detalhe) detalhe += ` (${corpo.detalhe})`;
-        } catch (_) { /* sem corpo JSON */ }
+      andamento.innerHTML = `<div class="cartao">
+        <strong>⏳ Processando…</strong> — buscando os documentos na SEFAZ.
+        Pode levar alguns minutos.</div>`;
+      if (status) status.textContent = 'pedido enviado';
+      botao.textContent = 'Aguarde…';
 
-        if (/Failed to send a request|not found|non-2xx|FunctionsFetchError/i.test(detalhe)) {
-          throw new Error(
-            'O download pelo servidor não está disponível. Use o "Baixar XML.bat" '
-            + 'no computador que tem o certificado.');
-        }
-        throw new Error(detalhe);
-      }
-
-      data = resposta.data;
-      if (data?.erro) throw new Error(data.erro);
-
-      const documentos = data?.documentos || [];
-      if (!documentos.length) {
-        ui.toast('Nenhum documento novo. Último NSU: ' + (data?.ult_nsu || ultNsu));
-        if (status) status.textContent = `Nenhum documento novo · último NSU ${data?.ult_nsu || ultNsu}`;
-      } else {
-        for (const doc of documentos) {
-          await sb.from('xml_baixados').insert({
-            loja_id: lojaId,
-            cnpj,
-            nsu: doc.nsu || null,
-            chave: doc.chave || null,
-            schema: doc.schema || null,
-            tipo: doc.tipo || null,
-            xml: doc.xml,
-            criado_por: ctx.perfil?.id || null,
-          });
-        }
-        ui.toast(`${documentos.length} documento(s) baixado(s).`);
-      }
-      ctx.recarregar();
+      acompanhar(pedido.id);
     } catch (erro) {
       ui.toast(erro.message, 'erro');
-      if (status) status.textContent = erro.message;
-    } finally {
       botao.disabled = false;
-      botao.textContent = 'Tentar pelo servidor';
+      botao.textContent = 'Baixar XML';
     }
   });
 
@@ -164,7 +168,7 @@ export async function render(raiz, ctx) {
     b.addEventListener('click', () => {
       const doc = baixados.find((d) => d.id === b.dataset.ver);
       if (!doc) return;
-      const { fechar, corpo } = ui.modal({
+      const { corpo } = ui.modal({
         titulo: `XML — ${doc.chave || doc.nsu || ''}`,
         largura: '900px',
         corpo: `<pre style="max-height:60vh;overflow:auto;font-size:12px;white-space:pre-wrap">${
@@ -180,7 +184,6 @@ export async function render(raiz, ctx) {
         a.click();
         URL.revokeObjectURL(a.href);
       });
-      void fechar;
     });
   }
 
@@ -193,5 +196,13 @@ export async function render(raiz, ctx) {
         ctx.recarregar();
       } catch (erro) { ui.toast(erro.message, 'erro'); }
     });
+  }
+
+  // pedido ainda em andamento ao abrir a tela
+  const ativo = pedidos.find((p) => p.status === 'pendente' || p.status === 'processando');
+  if (ativo) {
+    andamento.innerHTML = `<div class="cartao"><strong>⏳ Processando…</strong>
+      — pedido de ${ui.dataHoraBR(ativo.criado_em)}.</div>`;
+    acompanhar(ativo.id);
   }
 }

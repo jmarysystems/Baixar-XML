@@ -1,0 +1,25 @@
+name: baixar-xml
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  baixar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependência
+        run: pip install --quiet cryptography
+
+      - name: Processar fila
+        env:
+          SUPABASE_URL: https://cowbpaaaguylhlvnlaac.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python tools/baixar_xml_worker.py
