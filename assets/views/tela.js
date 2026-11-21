@@ -1,6 +1,6 @@
-import { listar, criar } from '../api.js?v=20261121e';
-import { sb } from '../api.js?v=20261121e';
-import * as ui from '../ui.js?v=20261121e';
+import { listar, criar } from '../api.js?v=20261121f';
+import { sb } from '../api.js?v=20261121f';
+import * as ui from '../ui.js?v=20261121f';
 
 // Prazo da manifestação do destinatário: 15 dias a partir da emissão
 const DIAS_PRAZO = 15;
@@ -159,7 +159,7 @@ export async function render(raiz, ctx) {
       </div>
       ${baixados.length ? `<div class="tabela-rolagem"><table>
         <thead><tr><th>CNPJ</th><th>Emitente</th><th>Chave</th><th>Tipo</th><th>Emissão</th>
-          <th>Prazo de manifestação</th><th>Manifestação</th><th>NSU</th>
+          <th>Prazo de manifestação</th><th>Manifestação</th><th>Recebimento</th><th>NSU</th>
           <th>Estabelecimento</th><th>Baixado em</th><th></th></tr></thead>
         <tbody>
           ${baixados.map((d) => `<tr data-id="${ui.esc(d.id)}" data-busca="${ui.esc(
@@ -178,13 +178,39 @@ export async function render(raiz, ctx) {
               const p = prazoManifestacao(d);
               return p ? `<span class="badge ${p.classe}">${ui.esc(p.texto)}</span>` : '—';
             })()}</td>
-            <td>${(d.tipo || '').startsWith('resNFe') && d.chave
-              ? `<button type="button" class="botao-pequeno"
+            <td>${(() => {
+              const resumo = (d.tipo || '').startsWith('resNFe') && d.chave;
+              if (!resumo) {
+                return d.tipo === 'NF-e'
+                  ? '<span class="badge badge-ok">completa</span>' : '—';
+              }
+              if (d.manifestacao === 'ciencia') {
+                return '<span class="badge badge-verde">manifestada</span>';
+              }
+              if (d.manifestacao === 'nao_realizada') {
+                return '<span class="badge badge-vermelho">não recebida</span>';
+              }
+              return `<button type="button" class="botao-pequeno"
                         data-manifestar="${ui.esc(d.chave)}"
-                        data-loja="${ui.esc(d.loja_id || '')}">Manifestar</button>`
-              : ((d.tipo === 'NF-e')
-                ? '<span class="badge badge-ok">completa</span>'
-                : '—')}</td>
+                        data-loja="${ui.esc(d.loja_id || '')}">Manifestar</button>`;
+            })()}</td>
+            <td>${(() => {
+              const resumo = (d.tipo || '').startsWith('resNFe') && d.chave;
+              if (!resumo) return '—';
+              if (d.manifestacao) {
+                return d.manifestacao === 'nao_realizada'
+                  ? '<span class="badge badge-vermelho">negado</span>'
+                  : '<span class="badge badge-verde">aceito</span>';
+              }
+              const prazo = prazoManifestacao(d);
+              if (!prazo || prazo.vencida) {
+                return '<span class="sub" title="fora do prazo para negar">—</span>';
+              }
+              return `<button type="button" class="botao-pequeno botao-perigo"
+                        data-negar="${ui.esc(d.chave)}"
+                        data-loja="${ui.esc(d.loja_id || '')}"
+                        data-emitente="${ui.esc(d.emitente_nome || '')}">Negar</button>`;
+            })()}</td>
             <td class="mono">${ui.esc(d.nsu || '—')}</td>
             <td>${ui.esc(d.arm_lojas?.nome || '—')}</td>
             <td>${ui.dataHoraBR(d.baixado_em)}</td>
@@ -343,6 +369,51 @@ export async function render(raiz, ctx) {
         ui.toast('XML excluído.');
         ctx.recarregar();
       } catch (erro) { ui.toast(erro.message, 'erro'); }
+    });
+  }
+
+  // --------------------------------------------------- negar recebimento
+  for (const b of raiz.querySelectorAll('[data-negar]')) {
+    b.addEventListener('click', async () => {
+      const chave = b.dataset.negar;
+      const lojaId = b.dataset.loja;
+      const emitente = b.dataset.emitente || '';
+      if (!lojaId) { ui.toast('Documento sem estabelecimento vinculado.', 'erro'); return; }
+
+      const justificativa = window.prompt(
+        `Negar o recebimento da nota${emitente ? ` de ${emitente}` : ''}?\n\n` +
+        `Chave: ${chave}\n\n` +
+        'Descreva o motivo (mínimo 15 caracteres). Isso registra a "Operação não Realizada" na SEFAZ:',
+        'Mercadoria nao recebida / operacao nao realizada');
+      if (justificativa === null) return;
+      if (justificativa.trim().length < 15) {
+        ui.toast('A justificativa precisa de pelo menos 15 caracteres.', 'erro');
+        return;
+      }
+
+      b.disabled = true;
+      b.textContent = 'Enviando…';
+      try {
+        const pedido = await criar('xml_pedidos', {
+          acao: 'negar',
+          loja_id: lojaId,
+          cnpj: b.closest('tr').querySelector('td').textContent.trim(),
+          chave,
+          justificativa: justificativa.trim(),
+          ult_nsu: '0',
+          tp_amb: '1',
+          cuf: '23',
+          criado_por: ctx.perfil?.id || null,
+        });
+        andamento.innerHTML = `<div class="cartao">
+          <strong>⏳ Negativa enviada para a fila</strong> — a SEFAZ registra o evento
+          e a linha passa a mostrar "não recebida".</div>`;
+        acompanhar(pedido.id);
+      } catch (erro) {
+        ui.toast(erro.message, 'erro');
+        b.disabled = false;
+        b.textContent = 'Negar';
+      }
     });
   }
 

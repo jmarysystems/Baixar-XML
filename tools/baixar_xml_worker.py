@@ -51,6 +51,7 @@ MOLDE_EVENTO = """<evento xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.0
     <verEvento>1.00</verEvento>
     <detEvento versao="1.00">
       <descEvento>{descricao}</descEvento>
+      {justificativa}
     </detEvento>
   </infEvento>
 </evento>"""
@@ -465,16 +466,24 @@ def enviar_evento(ctx, evento_assinado: str) -> str:
 
 
 def manifestar(pedido, ctx, chave_pem, cert_pem):
-    """Envia a Ciência da Emissão e devolve (ok, mensagem)."""
+    """Envia a manifestação (ciência 210210 ou não realizada 210240)."""
     chave = (pedido.get("chave") or "").strip()
     if len(chave) != 44:
         return False, "chave inválida para manifestar"
 
+    negar = (pedido.get("acao") == "negar")
+    justificativa = (pedido.get("justificativa") or "").strip()
+
+    if negar and len(justificativa) < 15:
+        return False, "a justificativa precisa de pelo menos 15 caracteres"
+
     dh = time.strftime("%Y-%m-%dT%H:%M:%S-03:00", time.localtime())
     evento = MOLDE_EVENTO.format(
-        tp_evento="210210", chave=chave, seq=1, cuf=pedido.get("cuf", "23"),
+        tp_evento="210240" if negar else "210210",
+        chave=chave, seq=1, cuf=pedido.get("cuf", "23"),
         tp_amb=pedido.get("tp_amb", "1"), cnpj=pedido["cnpj"], dh_evento=dh,
-        descricao="Ciencia da Emissao",
+        descricao="Operacao nao Realizada" if negar else "Ciencia da Emissao",
+        justificativa=f"<xJust>{justificativa}</xJust>" if negar else "",
     )
 
     assinado = assinar_evento(evento, chave_pem, cert_pem)
@@ -509,7 +518,7 @@ def main():
         acao = pedido.get("acao") or "baixar"
         print(f"pedido {pedido['id']} | CNPJ {pedido['cnpj']} | ação {acao}")
         try:
-            if acao == "manifestar":
+            if acao in ("manifestar", "negar"):
                 pfx, senha_cert = baixar_certificado(pedido["loja_id"])
                 chave_p, cert_p = chaves_pem(pfx, senha_cert)
                 ctx_http = contexto_tls_raw(cert_p, chave_p)
@@ -530,6 +539,13 @@ def main():
                 ja_existem = nsus_gravados(pedido["cnpj"])
                 gravados = gravar(pedido["loja_id"], pedido["cnpj"], docs, ja_existem,
                                   usuario_para(pedido["id"])) if docs else 0
+                tipo_manifestacao = "nao_realizada" if acao == "negar" else "ciencia"
+                api(f"/rest/v1/xml_baixados?chave=eq.{pedido.get('chave')}", "PATCH", {
+                    "manifestacao": tipo_manifestacao,
+                    "manifestada_em": agora(),
+                    "justificativa": pedido.get("justificativa"),
+                })
+
                 atualizar_pedido(pedido["id"], status="concluido", documentos=gravados,
                                  mensagem=f"{msg}; {gravados} documento(s) completo(s)")
                 print(f"  {msg} | XML completo: {gravados}")
