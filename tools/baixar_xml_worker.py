@@ -90,9 +90,13 @@ def api(caminho, metodo="GET", corpo=None, bruto=False):
             return exc.code, texto
 
 
-def pegar_pendente():
-    st, r = api("/rest/v1/xml_pedidos?status=eq.pendente&order=criado_em&limit=1")
+def pegar_pendente(ja_processados=None):
+    ja_processados = ja_processados or set()
+    st, r = api("/rest/v1/xml_pedidos?status=eq.pendente&order=criado_em&limit=5")
     if st == 200 and r:
+        r = [p for p in r if p["id"] not in ja_processados]
+        if not r:
+            return None
         pedido = r[0]
         st2, _ = api(f"/rest/v1/xml_pedidos?id=eq.{pedido['id']}",
                      "PATCH", {"status": "processando", "iniciado_em": agora()})
@@ -305,8 +309,11 @@ def processar(pedido):
 
 def main():
     processados = 0
-    for _ in range(2):
-        pedido = pegar_pendente()
+    vistos = set()
+    for _ in range(3):
+        pedido = pegar_pendente(vistos)
+        if pedido:
+            vistos.add(pedido["id"])
         if not pedido:
             break
         print(f"pedido {pedido['id']} | CNPJ {pedido['cnpj']}")
