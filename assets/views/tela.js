@@ -116,12 +116,17 @@ export async function render(raiz, ctx) {
     <div id="andamento"></div>
 
     <div class="cartao">
-      <div class="cartao-topo"><h2>${baixados.length} documento(s) baixado(s)</h2></div>
+      <div class="cartao-topo"><h2><span id="contador">${baixados.length}</span> documento(s) baixado(s)</h2></div>
+      <label class="campo" style="max-width:420px"><span>Pesquisar</span>
+        <input type="search" id="busca-docs"
+               placeholder="NSU, chave da NF-e, CNPJ ou tipo"></label>
       ${baixados.length ? `<div class="tabela-rolagem"><table>
         <thead><tr><th>CNPJ</th><th>Chave</th><th>Tipo</th><th>NSU</th>
           <th>Estabelecimento</th><th>Baixado em</th><th></th></tr></thead>
         <tbody>
-          ${baixados.map((d) => `<tr>
+          ${baixados.map((d) => `<tr data-busca="${ui.esc(
+            `${d.nsu || ''} ${d.chave || ''} ${d.cnpj || ''} ${d.tipo || ''} ${d.schema || ''}`
+              .toLowerCase())}">
             <td class="mono">${ui.esc(d.cnpj)}</td>
             <td class="mono">${ui.esc(d.chave || '—')}</td>
             <td>${ui.esc(d.tipo || d.schema || '—')}</td>
@@ -283,6 +288,24 @@ export async function render(raiz, ctx) {
         ui.toast('XML excluído.');
         ctx.recarregar();
       } catch (erro) { ui.toast(erro.message, 'erro'); }
+    });
+  }
+
+  // --------------------------------------------- pesquisa nos baixados
+  const buscaDocs = raiz.querySelector('#busca-docs');
+  const contador = raiz.querySelector('#contador');
+  if (buscaDocs) {
+    buscaDocs.addEventListener('input', () => {
+      const termo = buscaDocs.value.trim().toLowerCase();
+      let visiveis = 0;
+      for (const tr of raiz.querySelectorAll('tr[data-busca]')) {
+        const mostra = !termo || tr.dataset.busca.includes(termo);
+        tr.hidden = !mostra;
+        if (mostra) visiveis += 1;
+      }
+      if (contador) {
+        contador.textContent = termo ? `${visiveis} de ${baixados.length}` : baixados.length;
+      }
     });
   }
 
