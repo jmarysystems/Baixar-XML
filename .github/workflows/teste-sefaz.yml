@@ -1,0 +1,33 @@
+name: teste-sefaz
+on:
+  workflow_dispatch:
+
+jobs:
+  teste:
+    runs-on: ubuntu-latest
+    steps:
+      - name: DNS
+        run: |
+          echo "== DNS =="
+          getent hosts www1.nfe.fazenda.gov.br || echo "DNS falhou"
+          echo "== IP público do runner =="
+          curl -s https://api.ipify.org || true
+          echo ""
+
+      - name: TCP
+        run: |
+          echo "== TCP 443 =="
+          timeout 20 bash -c 'cat < /dev/null > /dev/tcp/www1.nfe.fazenda.gov.br/443' && echo "TCP OK" || echo "TCP falhou"
+
+      - name: TLS
+        run: |
+          echo "== handshake =="
+          timeout 30 openssl s_client -connect www1.nfe.fazenda.gov.br:443 \
+            -servername www1.nfe.fazenda.gov.br </dev/null 2>&1 | head -30 || echo "handshake falhou"
+
+      - name: HTTP
+        run: |
+          echo "== HTTP =="
+          timeout 30 curl -sS -o /dev/null -w "status=%{http_code}\n" \
+            https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx \
+            || echo "curl falhou"
